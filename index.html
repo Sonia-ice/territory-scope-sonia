@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Iceberg Dashboard — Analyse Territoriale Île-de-France</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg:       #0A0E14;
+      --surface:  #111720;
+      --border:   #1E2A38;
+      --accent:   #00D4FF;
+      --accent2:  #7B61FF;
+      --green:    #00E5A0;
+      --amber:    #FFB547;
+      --red:      #FF4D6A;
+      --text:     #E8EDF5;
+      --muted:    #64748B;
+      --card-bg:  #141C27;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'DM Mono', monospace;
+      font-size: 14px;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ─── NOISE TEXTURE ─── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0.4;
+    }
+
+    /* ─── GRID BG ─── */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ─── HERO GLOW ─── */
+    .glow-orb {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(120px);
+      pointer-events: none;
+    }
+    .glow-1 {
+      width: 600px; height: 600px;
+      background: radial-gradient(circle, rgba(0,212,255,0.12) 0%, transparent 70%);
+      top: -200px; left: -100px;
+      animation: drift 8s ease-in-out infinite alternate;
+    }
+    .glow-2 {
+      width: 500px; height: 500px;
+      background: radial-gradient(circle, rgba(123,97,255,0.10) 0%, transparent 70%);
+      top: 100px; right: -150px;
+      animation: drift 10s ease-in-out infinite alternate-reverse;
+    }
+    @keyframes drift {
+      from { transform: translate(0, 0); }
+      to   { transform: translate(30px, 40px); }
+    }
+
+    /* ─── LAYOUT ─── */
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 32px;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* ─── HEADER / NAV ─── */
+    header {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      backdrop-filter: blur(16px);
+      background: rgba(10,14,20,0.7);
+      border-bottom: 1px solid var(--border);
+    }
+    nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 60px;
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 32px;
+    }
+    .nav-logo {
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: 18px;
+      color: var(--accent);
+      letter-spacing: -0.5px;
+      text-decoration: none;
+    }
+    .nav-logo span { color: var(--text); }
+    .nav-links {
+      display: flex;
+      gap: 28px;
+      list-style: none;
+    }
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover { color: var(--accent); }
+
+    /* ─── HERO ─── */
+    .hero {
+      position: relative;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      overflow: hidden;
+      padding-top: 60px;
+    }
+    .hero-content {
+      padding: 80px 0 60px;
+    }
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0,212,255,0.08);
+      border: 1px solid rgba(0,212,255,0.2);
+      color: var(--accent);
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      padding: 6px 14px;
+      border-radius: 100px;
+      margin-bottom: 28px;
+      animation: fadeUp 0.6s ease both;
+    }
+    .hero-badge::before {
+      content: '';
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 8px var(--accent);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    h1 {
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: clamp(42px, 6vw, 72px);
+      line-height: 1.05;
+      letter-spacing: -2px;
+      margin-bottom: 20px;
+      animation: fadeUp 0.6s 0.1s ease both;
+    }
+    h1 .line-accent { color: var(--accent); }
+    h1 .line-dim { color: var(--muted); }
+
+    .hero-desc {
+      max-width: 560px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.7;
+      margin-bottom: 40px;
+      animation: fadeUp 0.6s 0.2s ease both;
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      animation: fadeUp 0.6s 0.3s ease both;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 13px 26px;
+      border-radius: 8px;
+      font-family: 'DM Mono', monospace;
+      font-size: 13px;
+      font-weight: 500;
+      text-decoration: none;
+      transition: all 0.2s;
+      cursor: pointer;
+      border: none;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #000;
+      font-weight: 600;
+      box-shadow: 0 0 24px rgba(0,212,255,0.3);
+    }
+    .btn-primary:hover {
+      background: #fff;
+      box-shadow: 0 0 36px rgba(0,212,255,0.5);
+      transform: translateY(-1px);
+    }
+    .btn-outline {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-outline:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      transform: translateY(-1px);
+    }
+
+    /* ─── STATS ROW ─── */
+    .stats-row {
+      display: flex;
+      gap: 0;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      margin-top: 60px;
+      animation: fadeUp 0.6s 0.4s ease both;
+    }
+    .stat-item {
+      flex: 1;
+      padding: 20px 28px;
+      border-right: 1px solid var(--border);
+    }
+    .stat-item:last-child { border-right: none; }
+    .stat-value {
+      font-family: 'Syne', sans-serif;
+      font-weight: 700;
+      font-size: 28px;
+      color: var(--accent);
+      letter-spacing: -1px;
+    }
+    .stat-label {
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+
+    /* ─── SECTIONS ─── */
+    section {
+      padding: 100px 0;
+      position: relative;
+      z-index: 1;
+    }
+    .section-header {
+      margin-bottom: 48px;
+    }
+    .section-tag {
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 10px;
+    }
+    h2 {
+      font-family: 'Syne', sans-serif;
+      font-weight: 700;
+      font-size: clamp(28px, 3vw, 40px);
+      letter-spacing: -1px;
+      color: var(--text);
+    }
+    .section-sub {
+      color: var(--muted);
+      margin-top: 10px;
+      max-width: 520px;
+      font-size: 14px;
+    }
+
+    /* ─── FILES GRID ─── */
+    .files-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 16px;
+    }
+    .file-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+      text-decoration: none;
+      color: inherit;
+      display: block;
+      position: relative;
+      overflow: hidden;
+    }
+    .file-card::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, rgba(0,212,255,0.04), transparent);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .file-card:hover {
+      border-color: rgba(0,212,255,0.4);
+      transform: translateY(-3px);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.3), 0 0 0 1px rgba(0,212,255,0.1);
+    }
+    .file-card:hover::before { opacity: 1; }
+
+    .file-icon {
+      width: 40px; height: 40px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      margin-bottom: 14px;
+    }
+    .icon-py  { background: rgba(0,212,255,0.12); }
+    .icon-json { background: rgba(123,97,255,0.12); }
+    .icon-geo { background: rgba(0,229,160,0.12); }
+    .icon-txt { background: rgba(255,181,71,0.12); }
+
+    .file-name {
+      font-family: 'Syne', sans-serif;
+      font-weight: 600;
+      font-size: 15px;
+      margin-bottom: 6px;
+      color: var(--text);
+    }
+    .file-desc {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+      margin-bottom: 14px;
+    }
+    .file-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .tag {
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 3px 9px;
+      border-radius: 100px;
+      border: 1px solid;
+    }
+    .tag-py   { color: var(--accent);  border-color: rgba(0,212,255,0.3);  background: rgba(0,212,255,0.06); }
+    .tag-json { color: var(--accent2); border-color: rgba(123,97,255,0.3); background: rgba(123,97,255,0.06); }
+    .tag-geo  { color: var(--green);   border-color: rgba(0,229,160,0.3);  background: rgba(0,229,160,0.06); }
+    .tag-req  { color: var(--amber);   border-color: rgba(255,181,71,0.3); background: rgba(255,181,71,0.06); }
+
+    /* ─── FEATURES ─── */
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+    }
+    .feature-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+    }
+    .feature-icon {
+      font-size: 24px;
+      margin-bottom: 12px;
+    }
+    .feature-title {
+      font-family: 'Syne', sans-serif;
+      font-weight: 600;
+      font-size: 14px;
+      margin-bottom: 8px;
+      color: var(--text);
+    }
+    .feature-desc {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    /* ─── INSTALL BLOCK ─── */
+    .install-block {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .install-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+    }
+    .install-dots { display: flex; gap: 6px; }
+    .dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+    }
+    .dot-r { background: #FF5F57; }
+    .dot-y { background: #FFBD2E; }
+    .dot-g { background: #28CA41; }
+    .install-title {
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: 0.06em;
+    }
+    .install-body {
+      padding: 24px;
+    }
+    .cmd-line {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .cmd-line:last-child { margin-bottom: 0; }
+    .prompt { color: var(--accent); font-size: 13px; user-select: none; }
+    .cmd    { color: var(--text); font-size: 13px; }
+    .cmd .kw  { color: var(--accent2); }
+    .cmd .arg { color: var(--green); }
+    .cmd .flag { color: var(--amber); }
+
+    /* ─── CTA BANNER ─── */
+    .cta-banner {
+      background: linear-gradient(135deg, rgba(0,212,255,0.08), rgba(123,97,255,0.08));
+      border: 1px solid rgba(0,212,255,0.2);
+      border-radius: 16px;
+      padding: 60px 40px;
+      text-align: center;
+    }
+    .cta-banner h2 {
+      margin-bottom: 12px;
+    }
+    .cta-banner p {
+      color: var(--muted);
+      margin-bottom: 28px;
+      font-size: 14px;
+    }
+
+    /* ─── FOOTER ─── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 28px 0;
+      position: relative;
+      z-index: 1;
+    }
+    .footer-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .footer-left {
+      font-family: 'Syne', sans-serif;
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .footer-right {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    /* ─── ANIMATIONS ─── */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(24px);
+      transition: opacity 0.6s ease, transform 0.6s ease;
+    }
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* ─── RESPONSIVE ─── */
+    @media (max-width: 640px) {
+      .stats-row { flex-direction: column; }
+      .stat-item { border-right: none; border-bottom: 1px solid var(--border); }
+      .stat-item:last-child { border-bottom: none; }
+      nav .nav-links { display: none; }
+      .cta-banner { padding: 40px 24px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- NAV -->
+  <header>
+    <nav>
+      <a href="#" class="nav-logo">ICEBERG<span>.dashboard</span></a>
+      <ul class="nav-links">
+        <li><a href="#fichiers">Fichiers</a></li>
+        <li><a href="#fonctionnalites">Fonctionnalités</a></li>
+        <li><a href="#installation">Installation</a></li>
+        <li><a href="https://github.com/sonia-ice/app-streamlit" target="_blank">GitHub ↗</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <!-- HERO -->
+  <div class="hero">
+    <div class="glow-orb glow-1"></div>
+    <div class="glow-orb glow-2"></div>
+    <div class="container">
+      <div class="hero-content">
+        <div class="hero-badge">Dashboard · Île-de-France · 2025</div>
+        <h1>
+          <span class="line-dim">Analyse</span><br>
+          <span class="line-accent">Territoriale</span><br>
+          <span>Iceberg</span>
+        </h1>
+        <p class="hero-desc">
+          Exploration interactive des données économiques, immobilières et sociales des communes des départements 91 et 94 — propulsé par Streamlit, Folium et l'IA (Mistral / Groq).
+        </p>
+        <div class="hero-actions">
+          <a href="https://iceberg-91-94-territory-scope.streamlit.app" target="_blank" class="btn btn-primary">
+            🚀 Ouvrir l'application
+          </a>
+          <a href="https://github.com/sonia-ice/app-streamlit" target="_blank" class="btn btn-outline">
+            ⬡ Voir sur GitHub
+          </a>
+        </div>
+
+        <div class="stats-row">
+          <div class="stat-item">
+            <div class="stat-value">91 + 94</div>
+            <div class="stat-label">Départements couverts</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value">~200</div>
+            <div class="stat-label">Communes analysées</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value">2 300</div>
+            <div class="stat-label">Lignes de code Python</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value">AI</div>
+            <div class="stat-label">Mistral / Groq intégré</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FICHIERS -->
+  <section id="fichiers">
+    <div class="container">
+      <div class="section-header reveal">
+        <div class="section-tag">// Dépôt</div>
+        <h2>Fichiers du projet</h2>
+        <p class="section-sub">Tous les fichiers sources nécessaires au fonctionnement du dashboard.</p>
+      </div>
+      <div class="files-grid reveal">
+
+        <a href="app.py" class="file-card">
+          <div class="file-icon icon-py">🐍</div>
+          <div class="file-name">app.py</div>
+          <div class="file-desc">Application principale Streamlit. Cartes interactives, tableaux de bord, scoring de risque et assistant IA intégré.</div>
+          <div class="file-meta">
+            <span class="tag tag-py">Python</span>
+            <span class="tag tag-py">Streamlit</span>
+            <span class="tag tag-py">~2 300 lignes</span>
+          </div>
+        </a>
+
+        <a href="iceberg_dataset_clean.json" class="file-card">
+          <div class="file-icon icon-json">{ }</div>
+          <div class="file-name">iceberg_dataset_clean.json</div>
+          <div class="file-desc">Dataset principal — données de population, chômage, immobilier, entreprises, score de risque par commune.</div>
+          <div class="file-meta">
+            <span class="tag tag-json">JSON</span>
+            <span class="tag tag-json">Données nettoyées</span>
+            <span class="tag tag-json">91 · 94</span>
+          </div>
+        </a>
+
+        <a href="communes_91_94.geojson" class="file-card">
+          <div class="file-icon icon-geo">🗺️</div>
+          <div class="file-name">communes_91_94.geojson</div>
+          <div class="file-desc">Contours géographiques des communes (Essonne + Val-de-Marne) au format GeoJSON pour les cartes Folium / Pydeck.</div>
+          <div class="file-meta">
+            <span class="tag tag-geo">GeoJSON</span>
+            <span class="tag tag-geo">Géographie</span>
+            <span class="tag tag-geo">IDF</span>
+          </div>
+        </a>
+
+        <a href="requirements-3.txt" class="file-card">
+          <div class="file-icon icon-txt">📋</div>
+          <div class="file-name">requirements.txt</div>
+          <div class="file-desc">Dépendances Python : streamlit, pandas, numpy, pydeck, folium, streamlit-folium, groq, mistralai.</div>
+          <div class="file-meta">
+            <span class="tag tag-req">pip</span>
+            <span class="tag tag-req">8 packages</span>
+          </div>
+        </a>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- FONCTIONNALITES -->
+  <section id="fonctionnalites" style="padding-top: 0;">
+    <div class="container">
+      <div class="section-header reveal">
+        <div class="section-tag">// Capacités</div>
+        <h2>Fonctionnalités</h2>
+        <p class="section-sub">Ce que fait le dashboard en un coup d'œil.</p>
+      </div>
+      <div class="features-grid reveal">
+        <div class="feature-card">
+          <div class="feature-icon">🗺️</div>
+          <div class="feature-title">Cartes interactives</div>
+          <div class="feature-desc">Visualisation Folium et Pydeck avec choroplèthes, marqueurs et couches dynamiques par indicateur.</div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">📊</div>
+          <div class="feature-title">Tableaux de bord</div>
+          <div class="feature-desc">KPIs en temps réel : population, chômage, valeur foncière, densité d'entreprises par commune.</div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">⚡</div>
+          <div class="feature-title">Score de risque</div>
+          <div class="feature-desc">Indicateur composite vert / orange / rouge calculé pour chaque commune à partir de multiples critères socio-économiques.</div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🤖</div>
+          <div class="feature-title">Assistant IA</div>
+          <div class="feature-desc">Chatbot intégré (Mistral ou Groq) pour interroger les données en langage naturel et obtenir des analyses territoriales.</div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🏠</div>
+          <div class="feature-title">Immobilier</div>
+          <div class="feature-desc">Prix au m², valeurs foncières moyennes et nombre de transactions par commune.</div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🔍</div>
+          <div class="feature-title">Comparatif communes</div>
+          <div class="feature-desc">Sélection et comparaison multi-communes sur tous les indicateurs disponibles.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- INSTALLATION -->
+  <section id="installation" style="padding-top: 0;">
+    <div class="container">
+      <div class="section-header reveal">
+        <div class="section-tag">// Démarrage rapide</div>
+        <h2>Installation locale</h2>
+        <p class="section-sub">Lancer le projet en local en quelques commandes.</p>
+      </div>
+      <div class="install-block reveal">
+        <div class="install-bar">
+          <div class="install-dots">
+            <div class="dot dot-r"></div>
+            <div class="dot dot-y"></div>
+            <div class="dot dot-g"></div>
+          </div>
+          <div class="install-title">terminal</div>
+          <div></div>
+        </div>
+        <div class="install-body">
+          <div class="cmd-line">
+            <span class="prompt">$</span>
+            <span class="cmd"><span class="kw">git</span> <span class="arg">clone</span> https://github.com/sonia-ice/app-streamlit</span>
+          </div>
+          <div class="cmd-line">
+            <span class="prompt">$</span>
+            <span class="cmd"><span class="kw">cd</span> <span class="arg">app-streamlit</span></span>
+          </div>
+          <div class="cmd-line">
+            <span class="prompt">$</span>
+            <span class="cmd"><span class="kw">pip</span> install <span class="flag">-r</span> <span class="arg">requirements.txt</span></span>
+          </div>
+          <div class="cmd-line">
+            <span class="prompt">$</span>
+            <span class="cmd"><span class="kw">streamlit</span> <span class="arg">run</span> app.py</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section style="padding-top: 0; padding-bottom: 100px;">
+    <div class="container">
+      <div class="cta-banner reveal">
+        <h2>Prêt à explorer les données ?</h2>
+        <p>L'application est déployée et accessible directement en ligne.</p>
+        <a href="https://iceberg-91-94-territory-scope.streamlit.app" target="_blank" class="btn btn-primary">
+          🚀 Ouvrir le Dashboard Streamlit
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer>
+    <div class="container">
+      <div class="footer-inner">
+        <div class="footer-left">ICEBERG.dashboard</div>
+        <div class="footer-right">Île-de-France · Dept. 91 & 94 · 2025</div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Scroll reveal
+    const reveals = document.querySelectorAll('.reveal');
+    const observer = new IntersectionObserver(
+      entries => entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); }),
+      { threshold: 0.12 }
+    );
+    reveals.forEach(el => observer.observe(el));
+  </script>
+
+</body>
+</html>
