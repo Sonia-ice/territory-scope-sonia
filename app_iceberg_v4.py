@@ -1058,7 +1058,10 @@ def page_attractivite(df: pd.DataFrame):
         elif "94" in dept_sel: df_m = df_m[df_m["code_dept"].astype(str)=="94"]
 
         df_m["color"]     = df_m["cat_custom"].apply(lambda c: ZONE_COLORS.get(c, [203,213,225,160]))
-        df_m["elevation"] = df_m["score_custom"] * 3200
+        df_m["elevation"] = (
+    df_m["score_custom"] * 8000
+    + df_m["population"] * 0.05
+)
         df_m["score_pct"] = (df_m["score_custom"]*100).round(1)
         df_m["pop_fmt"]   = df_m["population"].apply(safe_val)
         df_m["cho_fmt"]   = df_m["taux_chomage"].apply(lambda x: safe_val(x,1))
@@ -1096,9 +1099,17 @@ def page_attractivite(df: pd.DataFrame):
                     get_position="[longitude, latitude]", get_weight="weight",
                     radiusPixels=70, intensity=1.4, threshold=0.08,
                     color_range=[[240,249,255,0],[147,210,255,100],[59,130,246,200],[26,86,219,255]]),
-                pdk.Layer("ScatterplotLayer", data=df_m.nlargest(15,"score_custom"),
-                    get_position="[longitude, latitude]", get_color="[26,86,219,180]",
-                    get_radius=300, pickable=True, auto_highlight=True),
+                pdk.Layer(
+    "ColumnLayer",
+    data=df_m,
+    get_position='[longitude, latitude]',
+    get_elevation="elevation",
+    elevation_scale=15,
+    radius=250,
+    get_fill_color="color",
+    pickable=True,
+    auto_highlight=True,
+),
             ]
         elif mode_carte == "3D Colonnes":
             layers = [
@@ -1518,7 +1529,7 @@ def page_predictions_ml(df: pd.DataFrame):
             tooltip={"html":"<b>{ville}</b><br><span style='color:#ccc;font-size:11px;'>{ml_cluster}</span><br><i style='font-size:10px;'>{cluster_desc}</i>"},
             map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"),
             use_container_width=True)
-
+map_style="mapbox://styles/mapbox/dark-v11",tooltip=tooltip,
         # Tableau détail
         st.markdown("---")
         cluster_filter = st.selectbox("Filtrer par profil", ["Tous"] + sorted(df["ml_cluster"].unique().tolist()))
@@ -1563,8 +1574,13 @@ def page_deserts(df: pd.DataFrame):
 
     # ── CARTE ────────────────────────────────────────────────────
     df_m = df.dropna(subset=["latitude","longitude"]).copy()
-    view = pdk.ViewState(latitude=df_m["latitude"].mean(), longitude=df_m["longitude"].mean(),
-                         zoom=10, pitch=40, bearing=0)
+   view = pdk.ViewState(
+    latitude=df_m["latitude"].mean(),
+    longitude=df_m["longitude"].mean(),
+    zoom=11,
+    pitch=65,
+    bearing=35,
+)
     layers = []
 
     _niv_map = {"Fort uniquement":["Fort"],"Modéré et Fort":["Fort","Modéré"],"Tous":["Fort","Modéré","Faible"]}
@@ -2035,7 +2051,7 @@ def page_communes(df: pd.DataFrame):
             ],
             initial_view_state=view_c,
             tooltip={"html":"<b>{ville}</b><br><span style='color:#ccc;font-size:11px;'>{dept}</span>"},
-            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"),
+            map_style="mapbox://styles/mapbox/navigation-night-v1",
             use_container_width=True)
 
         # Tableau comparaison
