@@ -559,7 +559,7 @@ def generate_timeline_data(df: pd.DataFrame, ville: str) -> pd.DataFrame:
         drift   = 0.02 * (i - 3)
         records.append({
             "annee":       y,
-            "attractivite": round((base_attr + drift + random.gauss(0, 0.03)).clip(0,1), 3),
+            "attractivite": round(max(0, min(1, base_attr + drift + random.gauss(0, 0.03))), 3),
             "chomage":      round((base_cho  - drift*2 + random.gauss(0, 0.2)).clip(0,35), 1),
             "entreprises":  int(base_ent * (1 + 0.04*i + random.gauss(0, 0.02))),
             "type":         "Prévision IA" if is_pred else "Historique",
