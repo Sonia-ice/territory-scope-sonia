@@ -8,3 +8,4 @@ pydeck
 folium
 streamlit-folium
 altair
+requests
