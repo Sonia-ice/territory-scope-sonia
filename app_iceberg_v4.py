@@ -15,6 +15,12 @@ import pandas as pd
 import numpy as np
 import pydeck as pdk
 import altair as alt
+try:
+    import folium
+    from streamlit_folium import st_folium
+    _FOLIUM_OK = True
+except ImportError:
+    _FOLIUM_OK = False
 
 # LLM
 try:
@@ -545,26 +551,84 @@ def build_ml_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_timeline_data(df: pd.DataFrame, ville: str) -> pd.DataFrame:
-    """Génère des données temporelles simulées pour une commune."""
+    """Génère des données temporelles simulées 2019-2030 pour une commune (tous indicateurs)."""
     row = df[df["ville"] == ville].iloc[0]
     random.seed(hash(ville) % 9999)
-    annees = list(range(2019, 2027))
+    annees     = list(range(2019, 2031))
     base_attr  = float(row["score_attractivite"])
     base_cho   = float(row["taux_chomage"])
     base_ent   = float(row["nb_entreprises_actives"])
+    base_rev   = float(row.get("revenu_median",    22000))
+    base_prix  = float(row.get("prix_m2_median",    3000))
+    base_pauv  = float(row.get("taux_pauvrete",       15))
+    base_med   = float(row.get("score_desert_medical", 0.5))
+    base_opp   = float(row.get("opportunity_score", base_attr))
+    base_risk  = float(row.get("risk_score",          0.4))
+    cluster    = str(row.get("ml_cluster", "N/A"))
+
+    trend_map = {
+        "Territoire dynamique": (+0.025, -0.15, +0.05),
+        "Potentiel émergent":   (+0.020, -0.10, +0.04),
+        "Territoire stable":    (+0.005, -0.05, +0.02),
+        "Zone de vigilance":    (-0.010, +0.10, -0.01),
+        "Désert de services":   (-0.015, +0.15, -0.02),
+    }
+    t_attr, t_cho, t_ent = trend_map.get(cluster, (+0.010, -0.05, +0.02))
 
     records = []
     for i, y in enumerate(annees):
         is_pred = y >= 2025
-        drift   = 0.02 * (i - 3)
+        noise   = 1 if not is_pred else 0.5
+        yr_attr  = round(max(0, min(1,   base_attr  + t_attr*(i-3) + random.gauss(0, 0.025*noise))), 3)
+        yr_cho   = round(max(0, min(35,  base_cho   + t_cho *(i-3) + random.gauss(0, 0.20 *noise))), 1)
+        yr_ent   = int(max(0,            base_ent   * (1 + t_ent*(i-3) + random.gauss(0, 0.015*noise))))
+        yr_rev   = int(max(12000,        base_rev   * (1 + 0.018*(i-3) + random.gauss(0, 0.008*noise))))
+        yr_prix  = int(max(1000,         base_prix  * (1 + 0.022*(i-3) + random.gauss(0, 0.010*noise))))
+        yr_pauv  = round(max(0, min(60,  base_pauv  - 0.12*(i-3)      + random.gauss(0, 0.15 *noise))), 1)
+        yr_med   = round(max(0, min(1,   base_med   - 0.012*(i-3)     + random.gauss(0, 0.015*noise))), 3)
+        yr_opp   = round(max(0, min(1,   base_opp   + t_attr*0.8*(i-3)+ random.gauss(0, 0.02 *noise))), 3)
+        yr_risk  = round(max(0, min(1,   base_risk  - t_attr*0.5*(i-3)+ random.gauss(0, 0.02 *noise))), 3)
+        yr_cat   = ("Zone Prioritaire" if yr_attr >= .70 else
+                    ("Zone Favorable"  if yr_attr >= .50 else
+                    ("Zone Possible"   if yr_attr >= .30 else "Non Recommandé")))
         records.append({
-            "annee":       y,
-            "attractivite": round(max(0, min(1,  base_attr + drift + random.gauss(0, 0.03))), 3),
-            "chomage":      round(max(0, min(35, base_cho  - drift*2 + random.gauss(0, 0.2))), 1),
-            "entreprises":  int(base_ent * (1 + 0.04*i + random.gauss(0, 0.02))),
-            "type":         "Prévision IA" if is_pred else "Historique",
+            "annee": y, "attractivite": yr_attr, "chomage": yr_cho,
+            "entreprises": yr_ent, "revenu": yr_rev, "prix_m2": yr_prix,
+            "pauvrete": yr_pauv, "desert_med": yr_med,
+            "opportunite": yr_opp, "risque": yr_risk,
+            "cat_zone": yr_cat,
+            "type": "Prévision IA" if is_pred else "Historique",
         })
     return pd.DataFrame(records)
+
+
+def project_df_to_year(df: pd.DataFrame, annee: int) -> pd.DataFrame:
+    """Recalcule les scores de toutes les communes pour une année cible (2025-2030)."""
+    if annee <= 2025:
+        return df.copy()
+    df2 = df.copy()
+    rng   = np.random.RandomState(annee)
+    delta = annee - 2025
+    cluster_trend = {
+        "Territoire dynamique": +0.025, "Potentiel émergent":  +0.020,
+        "Territoire stable":    +0.005, "Zone de vigilance":   -0.010,
+        "Désert de services":   -0.015,
+    }
+    for idx, row in df2.iterrows():
+        trend    = cluster_trend.get(str(row.get("ml_cluster","N/A")), 0.008)
+        new_attr = max(0.0, min(1.0, float(row["score_attractivite"]) + trend*delta + rng.normal(0,0.015)))
+        new_opp  = max(0.0, min(1.0, float(row.get("opportunity_score", new_attr)) + trend*0.8*delta + rng.normal(0,0.01)))
+        new_risk = max(0.0, min(1.0, float(row.get("risk_score",0.4)) - trend*0.5*delta + rng.normal(0,0.01)))
+        df2.at[idx, "score_attractivite"]     = new_attr
+        df2.at[idx, "pred_attractivite_2026"] = new_attr
+        df2.at[idx, "opportunity_score"]      = new_opp
+        df2.at[idx, "risk_score"]             = new_risk
+    sc = df2["score_attractivite"]
+    mn, mx = sc.min(), sc.max()
+    df2["score_custom"] = ((sc-mn)/(mx-mn)).clip(0,1) if mx > mn else sc.clip(0,1)
+    df2["cat_custom"] = df2["score_custom"].apply(
+        lambda s: "Zone Prioritaire" if s>=.70 else ("Zone Favorable" if s>=.50 else ("Zone Possible" if s>=.30 else "Non Recommandé")))
+    return df2
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -615,9 +679,9 @@ def init_session_state():
 # 7. SIDEBAR
 # ══════════════════════════════════════════════════════════════════
 def render_sidebar(df: pd.DataFrame):
-    _n = len(df)
-    _prio  = len(df[df["cat_attractivite"] == "Zone Prioritaire"])
-    _sig   = len(df[df["cat_signal_faible"] == "Signal Fort"])
+    _n      = len(df)
+    _prio   = len(df[df["cat_attractivite"] == "Zone Prioritaire"])
+    _sig    = len(df[df["cat_signal_faible"] == "Signal Fort"])
     _desert = len(df[df["cat_desert_medical"] == "Fort"])
 
     with st.sidebar:
@@ -643,13 +707,13 @@ def render_sidebar(df: pd.DataFrame):
                 <div style="font-size:20px;font-weight:800;color:#F1F5F9;">{_n}</div>
                 <div style="font-size:10px;color:#94A3B8;margin-top:1px;">Communes</div>
               </div>
-              <div style="background:rgba(22,163,74,.12);border-radius:10px;padding:10px 12px;">
+              <div style="background:rgba(22,163,74,.12);border-radius:10px;padding:10px 12px;cursor:pointer;">
                 <div style="font-size:20px;font-weight:800;color:#34D399;">{_prio}</div>
-                <div style="font-size:10px;color:#94A3B8;margin-top:1px;">Prioritaires</div>
+                <div style="font-size:10px;color:#94A3B8;margin-top:1px;">Prioritaires ↗</div>
               </div>
-              <div style="background:rgba(251,191,36,.10);border-radius:10px;padding:10px 12px;">
+              <div style="background:rgba(251,191,36,.10);border-radius:10px;padding:10px 12px;cursor:pointer;">
                 <div style="font-size:20px;font-weight:800;color:#FBBF24;">{_sig}</div>
-                <div style="font-size:10px;color:#94A3B8;margin-top:1px;">Signaux forts</div>
+                <div style="font-size:10px;color:#94A3B8;margin-top:1px;">Signaux forts ↗</div>
               </div>
               <div style="background:rgba(220,38,38,.10);border-radius:10px;padding:10px 12px;">
                 <div style="font-size:20px;font-weight:800;color:#F87171;">{_desert}</div>
@@ -657,8 +721,23 @@ def render_sidebar(df: pd.DataFrame):
               </div>
             </div>
           </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px;">
         </div>
         """, unsafe_allow_html=True)
+
+        # Boutons invisibles alignés sur les cartes — directeur uniquement
+        if st.session_state.get("role") == "directeur":
+            _ba, _bb = st.columns(2)
+            with _ba:
+                if st.button("📋 Rapport Prioritaires", key="btn_goto_prio",
+                             use_container_width=True, type="secondary"):
+                    st.session_state["_nav_override"] = "📋  Rapport Prioritaires"
+                    st.rerun()
+            with _bb:
+                if st.button("🚨 Rapport Signaux", key="btn_goto_sig",
+                             use_container_width=True, type="secondary"):
+                    st.session_state["_nav_override"] = "🚨  Rapport Signaux"
+                    st.rerun()
 
         if st.session_state.role is not None:
             st.markdown('<p style="font-size:9px;color:#FFFFFF;text-transform:uppercase;'
@@ -677,6 +756,8 @@ def render_sidebar(df: pd.DataFrame):
                 nav_items = [
                     "🏆  Classement admins",
                     "⭐  Carte Attractivité",
+                    "📋  Rapport Prioritaires",
+                    "🚨  Rapport Signaux",
                     "🏥  Carte Déserts",
                     "📈  Indicateurs",
                     "🔮  Prédictions ML",
@@ -685,7 +766,14 @@ def render_sidebar(df: pd.DataFrame):
                     "💬  Assistant IA",
                 ]
 
-            page = st.radio("", nav_items, label_visibility="collapsed")
+            # Calcul de l'index de départ (nav_override ou 0)
+            _default_idx = 0
+            _override = st.session_state.get("_nav_override", "")
+            if _override in nav_items:
+                _default_idx = nav_items.index(_override)
+                del st.session_state["_nav_override"]
+
+            page = st.radio("", nav_items, index=_default_idx, label_visibility="collapsed")
             st.markdown("</div>", unsafe_allow_html=True)
 
             st.markdown('<div style="padding:10px 18px 18px;">', unsafe_allow_html=True)
@@ -992,35 +1080,630 @@ def page_classement(df: pd.DataFrame):
 
 
 # ══════════════════════════════════════════════════════════════════
-# 10. PAGE CARTE ATTRACTIVITÉ
+# 10. PAGE CARTE ATTRACTIVITÉ — RADAR TERRITOIRE VIVANT
 # ══════════════════════════════════════════════════════════════════
+
+def _compute_secteurs(row: pd.Series) -> list:
+    """
+    Calcule un score d'adéquation pour chaque type de projet selon les données de la commune.
+    Retourne une liste triée de (icone, label, score_pct).
+    """
+    cho   = float(row.get("taux_chomage",    10))
+    pauv  = float(row.get("taux_pauvrete",   15))
+    rev   = float(row.get("revenu_median",   22000))
+    prix  = float(row.get("prix_m2_median",  3000))
+    pop   = float(row.get("population",      5000))
+    ent   = float(row.get("nb_entreprises_actives", 50))
+    med   = float(row.get("score_desert_medical",   0.5))
+    com   = float(row.get("score_desert_commercial",0.5))
+    mob   = float(row.get("score_desert_mobilite",  0.5))
+    gares = float(row.get("nb_gares", 0))
+    den   = float(row.get("densite_hab_km2", 500))
+
+    # Normalisation helpers
+    def norm(v, lo, hi): return max(0.0, min(1.0, (v - lo) / max(hi - lo, 1)))
+
+    rev_n   = norm(rev,   15000, 45000)   # revenu normalisé
+    pop_n   = norm(pop,   500,   80000)   # population normalisée
+    den_n   = norm(den,   50,    5000)    # densité normalisée
+    prix_n  = norm(prix,  1500,  7000)    # prix m² normalisé (haut = cher)
+    cho_n   = norm(cho,   3,     25)      # chômage normalisé (haut = mauvais)
+    ent_n   = norm(ent,   10,    500)     # entreprises normalisées
+    mob_n   = norm(gares, 0,     3)       # mobilité (gares)
+
+    secteurs_raw = {
+        ("🛒", "Commerce"):       0.35*pop_n + 0.25*(1-cho_n) + 0.20*rev_n  + 0.10*den_n   + 0.10*(1-com),
+        ("🏥", "Médecin"):        0.45*med   + 0.25*pop_n     + 0.20*(1-cho_n)+ 0.10*rev_n,
+        ("🎓", "Formation"):      0.30*pop_n + 0.25*cho_n     + 0.25*(1-rev_n)+ 0.20*mob_n,
+        ("🏭", "Industrie"):      0.30*(1-den_n)+0.25*(1-prix_n)+0.25*mob_n  + 0.20*(1-cho_n),
+        ("📦", "Logistique"):     0.35*mob_n + 0.30*(1-den_n) + 0.20*(1-prix_n)+0.15*ent_n,
+        ("🍔", "Restauration"):   0.35*den_n + 0.25*rev_n     + 0.25*pop_n   + 0.15*(1-com),
+        ("💊", "Pharmacie"):      0.40*med   + 0.30*pop_n     + 0.20*rev_n   + 0.10*den_n,
+        ("🏗️",  "Immobilier"):    0.35*(1-prix_n)+0.30*pop_n  + 0.25*rev_n   + 0.10*mob_n,
+    }
+    result = [(ico, lbl, round(v * 100)) for (ico, lbl), v in secteurs_raw.items()]
+    result.sort(key=lambda x: x[2], reverse=True)
+    return result
+
+
+def _compute_freins(row: pd.Series) -> list:
+    """
+    Identifie les freins principaux d'un territoire (pour zones Possible / Non Recommandé).
+    Retourne une liste de (icone, description, sévérité) triée par sévérité décroissante.
+    """
+    freins = []
+    cho   = float(row.get("taux_chomage",    10))
+    pauv  = float(row.get("taux_pauvrete",   15))
+    rev   = float(row.get("revenu_median",   22000))
+    prix  = float(row.get("prix_m2_median",  3000))
+    pop   = float(row.get("population",      5000))
+    med   = float(row.get("score_desert_medical",    0.5))
+    com   = float(row.get("score_desert_commercial", 0.5))
+    mob   = float(row.get("score_desert_mobilite",   0.5))
+    sig   = float(row.get("score_signal_faible",     0.3))
+    risk  = float(row.get("risk_score",              0.5))
+
+    if cho > 15:
+        freins.append(("💼", f"Chômage élevé ({cho:.1f}%)", min(1.0, cho/25)))
+    elif cho > 10:
+        freins.append(("💼", f"Chômage modéré ({cho:.1f}%)", cho/25))
+
+    if pauv > 25:
+        freins.append(("📉", f"Taux de pauvreté critique ({pauv:.1f}%)", min(1.0, pauv/40)))
+    elif pauv > 18:
+        freins.append(("📉", f"Pauvreté élevée ({pauv:.1f}%)", pauv/40))
+
+    if rev < 18000:
+        freins.append(("💶", f"Revenu médian faible ({int(rev):,} €)".replace(",", " "), 1 - rev/25000))
+    elif rev < 22000:
+        freins.append(("💶", f"Revenu médian modeste ({int(rev):,} €)".replace(",", " "), 1 - rev/25000))
+
+    if med > 0.65:
+        freins.append(("🏥", "Désert médical — accès aux soins difficile", med))
+    elif med > 0.45:
+        freins.append(("🏥", "Couverture médicale insuffisante", med))
+
+    if com > 0.65:
+        freins.append(("🏪", "Désert commercial — peu de commerces", com))
+
+    if mob > 0.60:
+        freins.append(("🚌", "Mobilité limitée — transports insuffisants", mob))
+
+    if pop < 1000:
+        freins.append(("👥", f"Population très faible ({int(pop):,} hab.)".replace(",", " "), 0.7))
+
+    if prix > 5500:
+        freins.append(("🏠", f"Foncier très cher ({int(prix):,} €/m²)".replace(",", " "), min(1.0, prix/7000)))
+
+    if sig > 0.65:
+        freins.append(("⚡", "Signal faible détecté — instabilité territoriale", sig))
+
+    if risk > 0.70:
+        freins.append(("⚠️", "Risque ML élevé — territoire fragilisé", risk))
+
+    freins.sort(key=lambda x: x[2], reverse=True)
+    return freins[:5]   # max 5 freins affichés
+
+
+def _build_popup_html(row: pd.Series, df_full: pd.DataFrame = None) -> str:
+    """Génère le HTML du popup riche : jauges ML + secteurs/freins + sparklines 2026-2030."""
+    score_pct = float(row.get("score_custom", 0)) * 100
+    opp_pct   = float(row.get("opportunity_score", 0)) * 100
+    pred_pct  = float(row.get("pred_attractivite_2026", row.get("score_attractivite", 0))) * 100
+    risk_pct  = float(row.get("risk_score", 0.5)) * 100
+    cluster   = str(row.get("ml_cluster", "N/A"))
+    cat       = str(row.get("cat_custom", ""))
+    ville     = str(row.get("ville", ""))
+    pop_fmt   = str(row.get("pop_fmt", "N/A"))
+    cho_fmt   = str(row.get("cho_fmt", "N/A"))
+    rev_fmt   = str(row.get("rev_fmt", "N/A"))
+    prix_m2   = safe_val(row.get("prix_m2_median", 0))
+
+    zone_colors = {
+        "Zone Prioritaire": ("#16A34A", "#D1FAE5", "🟢"),
+        "Zone Favorable":   ("#1A56DB", "#EBF1FF", "🔵"),
+        "Zone Possible":    ("#D97706", "#FEF3C7", "🟡"),
+        "Non Recommandé":   ("#64748B", "#F1F5F9", "⚪"),
+    }
+    fg, bg, dot = zone_colors.get(cat, ("#64748B", "#F1F5F9", "⚪"))
+    risk_color  = "#DC2626" if risk_pct > 65 else ("#D97706" if risk_pct > 40 else "#059669")
+
+    def bar(val, color, label):
+        return (
+            f"<div style='margin:4px 0;'>"
+            f"<div style='display:flex;justify-content:space-between;font-size:10px;"
+            f"color:#555;margin-bottom:2px;'>"
+            f"<span>{label}</span>"
+            f"<span style='font-weight:700;color:{color};'>{val:.0f}%</span></div>"
+            f"<div style='background:#E2E8F2;border-radius:4px;height:5px;overflow:hidden;'>"
+            f"<div style='width:{val:.0f}%;height:5px;background:{color};border-radius:4px;'>"
+            f"</div></div></div>"
+        )
+
+    # ── Section dynamique selon la zone ───────────────────────────
+    is_positive = cat in ("Zone Prioritaire", "Zone Favorable")
+
+    if is_positive:
+        secteurs = _compute_secteurs(row)
+        top3     = secteurs[:3]
+        sec_title = "✅ Secteurs recommandés"
+        sec_bg    = "#F0FDF4"
+        sec_border= "#BBF7D0"
+        sec_title_color = "#166534"
+        rows_html = ""
+        for ico, lbl, sc in top3:
+            bar_color = "#16A34A" if sc >= 70 else ("#1A56DB" if sc >= 50 else "#D97706")
+            rows_html += (
+                f"<div style='margin:5px 0;'>"
+                f"<div style='display:flex;justify-content:space-between;font-size:11px;"
+                f"margin-bottom:2px;'>"
+                f"<span style='font-weight:600;color:#1E293B;'>{ico} {lbl}</span>"
+                f"<span style='font-weight:800;color:{bar_color};'>{sc}%</span></div>"
+                f"<div style='background:#D1FAE5;border-radius:3px;height:5px;overflow:hidden;'>"
+                f"<div style='width:{sc}%;height:5px;background:{bar_color};border-radius:3px;'>"
+                f"</div></div></div>"
+            )
+        # Lien "Voir tous les secteurs"
+        all_sec_txt = " · ".join(f"{ico}{lbl} {sc}%" for ico, lbl, sc in secteurs[3:])
+        sec_extra = (
+            f"<div style='font-size:9px;color:#64748B;margin-top:4px;border-top:1px solid #BBF7D0;"
+            f"padding-top:4px;'>{all_sec_txt}</div>"
+        ) if secteurs[3:] else ""
+        dynamic_block = (
+            f"<div style='background:{sec_bg};border:1px solid {sec_border};"
+            f"border-radius:8px;padding:8px 10px;margin-top:8px;'>"
+            f"<div style='font-size:10px;font-weight:800;color:{sec_title_color};"
+            f"text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;'>{sec_title}</div>"
+            f"{rows_html}{sec_extra}"
+            f"</div>"
+        )
+    else:
+        freins = _compute_freins(row)
+        fr_title = "🚧 Freins identifiés"
+        fr_rows  = ""
+        for ico, desc, sev in freins:
+            sev_color = "#DC2626" if sev > 0.65 else ("#D97706" if sev > 0.40 else "#64748B")
+            sev_bg    = "#FEE2E2" if sev > 0.65 else ("#FEF3C7" if sev > 0.40 else "#F1F5F9")
+            sev_lbl   = "Critique" if sev > 0.65 else ("Élevé" if sev > 0.40 else "Modéré")
+            fr_rows += (
+                f"<div style='display:flex;align-items:flex-start;gap:6px;"
+                f"padding:4px 0;border-bottom:1px solid #FEE2E2;'>"
+                f"<span style='font-size:12px;flex-shrink:0;'>{ico}</span>"
+                f"<div style='flex:1;'>"
+                f"<span style='font-size:10px;color:#1E293B;line-height:1.3;'>{desc}</span>"
+                f"</div>"
+                f"<span style='background:{sev_bg};color:{sev_color};padding:1px 5px;"
+                f"border-radius:10px;font-size:9px;font-weight:700;white-space:nowrap;'>{sev_lbl}</span>"
+                f"</div>"
+            )
+        if not freins:
+            fr_rows = "<div style='font-size:10px;color:#64748B;'>Données insuffisantes pour analyse.</div>"
+
+        # Conseil d'action
+        conseil = ""
+        if cat == "Zone Possible":
+            conseil = (
+                f"<div style='margin-top:6px;background:#FEF3C7;border-radius:6px;"
+                f"padding:5px 8px;font-size:10px;color:#92400E;'>"
+                f"💡 <b>Opportunité conditionnelle</b> — investissement possible si les freins "
+                f"identifiés sont adressés en amont (accompagnement, subventions, partenariats)."
+                f"</div>"
+            )
+        else:
+            conseil = (
+                f"<div style='margin-top:6px;background:#FEE2E2;border-radius:6px;"
+                f"padding:5px 8px;font-size:10px;color:#991B1B;'>"
+                f"⛔ <b>Zone à éviter</b> — cumuler plusieurs freins critiques rend "
+                f"l'investissement à haut risque sans plan de redressement territorial."
+                f"</div>"
+            )
+
+        dynamic_block = (
+            f"<div style='background:#FFF5F5;border:1px solid #FCA5A5;"
+            f"border-radius:8px;padding:8px 10px;margin-top:8px;'>"
+            f"<div style='font-size:10px;font-weight:800;color:#991B1B;"
+            f"text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;'>{fr_title}</div>"
+            f"{fr_rows}{conseil}"
+            f"</div>"
+        )
+
+    # ── Sparklines prédictions 2026-2030 ─────────────────────────
+    sparkline_block = ""
+    if df_full is not None:
+        try:
+            tl = generate_timeline_data(df_full, ville)
+            tl_pred = tl[tl["annee"] >= 2025]   # on affiche 2025→2030
+
+            svg_attr = _build_sparkline_svg(tl_pred, "attractivite", "#1A56DB")
+            svg_opp  = _build_sparkline_svg(tl_pred, "opportunite",  "#059669")
+            svg_cho  = _build_sparkline_svg(tl_pred, "chomage",      "#DC2626")
+            svg_rev  = _build_sparkline_svg(tl_pred, "revenu",       "#7C3AED")
+            svg_prix = _build_sparkline_svg(tl_pred, "prix_m2",      "#D97706")
+            svg_risk = _build_sparkline_svg(tl_pred, "risque",       "#F59E0B")
+
+            # Évolution zone 2026→2030
+            zone_evol = " → ".join(
+                f"<span style='font-weight:700;color:{"#16A34A" if c=="Zone Prioritaire" else "#1A56DB" if c=="Zone Favorable" else "#D97706" if c=="Zone Possible" else "#64748B"};'>"
+                f"{y}</span>"
+                for y, c in zip(tl_pred["annee"].tolist()[::2], tl_pred["cat_zone"].tolist()[::2])
+            )
+
+            sparkline_block = (
+                f"<div style='border-top:1px solid #E2E8F2;margin-top:8px;padding-top:8px;'>"
+                f"<div style='font-size:9px;font-weight:800;color:#8895AA;text-transform:uppercase;"
+                f"letter-spacing:.7px;margin-bottom:6px;'>📈 Trajectoire 2025 → 2030</div>"
+                # Zone timeline
+                f"<div style='font-size:9px;color:#64748B;margin-bottom:7px;line-height:1.6;'>"
+                f"Zone prévue : {zone_evol}</div>"
+                # Grille sparklines 2×3
+                f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:6px;'>"
+                # Attractivité
+                f"<div><div style='font-size:9px;color:#8895AA;font-weight:600;margin-bottom:2px;'>🎯 Attractivité</div>{svg_attr}</div>"
+                # Opportunité ML
+                f"<div><div style='font-size:9px;color:#8895AA;font-weight:600;margin-bottom:2px;'>💡 Opportunité</div>{svg_opp}</div>"
+                # Chômage
+                f"<div><div style='font-size:9px;color:#8895AA;font-weight:600;margin-bottom:2px;'>💼 Chômage %</div>{svg_cho}</div>"
+                # Revenu
+                f"<div><div style='font-size:9px;color:#8895AA;font-weight:600;margin-bottom:2px;'>💶 Revenu méd.</div>{svg_rev}</div>"
+                # Prix m²
+                f"<div><div style='font-size:9px;color:#8895AA;font-weight:600;margin-bottom:2px;'>🏠 Prix m²</div>{svg_prix}</div>"
+                # Risque
+                f"<div><div style='font-size:9px;color:#8895AA;font-weight:600;margin-bottom:2px;'>⚠️ Risque ML</div>{svg_risk}</div>"
+                f"</div>"
+                f"<div style='font-size:8px;color:#CBD5E1;margin-top:5px;text-align:right;'>"
+                f"— — Prévision IA &nbsp; — Historique</div>"
+                f"</div>"
+            )
+        except Exception:
+            sparkline_block = ""
+
+    return (
+        f"<div style='font-family:Plus Jakarta Sans,sans-serif;min-width:250px;max-width:290px;padding:2px;'>"
+        # ── En-tête dégradé ───────────────────────────────────────
+        f"<div style='background:linear-gradient(135deg,#0B1F5C,#1A56DB);"
+        f"border-radius:10px 10px 0 0;padding:10px 13px;margin:-4px -4px 10px;'>"
+        f"<div style='font-size:15px;font-weight:800;color:#fff;letter-spacing:-.3px;'>{ville}</div>"
+        f"<div style='margin-top:4px;display:flex;align-items:center;gap:6px;'>"
+        f"<span style='background:{bg};color:{fg};padding:2px 8px;border-radius:20px;"
+        f"font-size:10px;font-weight:700;'>{dot} {cat}</span>"
+        f"<span style='font-size:13px;font-weight:800;color:#fff;'>{score_pct:.0f}%</span>"
+        f"</div></div>"
+        # ── Cluster ML ────────────────────────────────────────────
+        f"<div style='background:#EDE9FE;border-radius:6px;padding:5px 9px;margin-bottom:7px;"
+        f"display:flex;align-items:center;gap:6px;'>"
+        f"<span style='font-size:11px;'>🤖</span>"
+        f"<span style='font-size:11px;font-weight:700;color:#5B21B6;'>Profil ML : {cluster}</span>"
+        f"</div>"
+        # ── Jauges ML ─────────────────────────────────────────────
+        f"<div style='margin-bottom:7px;'>"
+        + bar(opp_pct,  "#1A56DB", "🎯 Opportunité ML")
+        + bar(pred_pct, "#059669", "🔮 Prédiction 2026")
+        + bar(risk_pct, risk_color, "⚠️ Risque ML")
+        + f"</div>"
+        # ── Section dynamique (secteurs OU freins) ────────────────
+        + dynamic_block
+        # ── Données territoire ────────────────────────────────────
+        + f"<div style='border-top:1px solid #E2E8F2;margin-top:8px;padding-top:7px;"
+        f"display:grid;grid-template-columns:1fr 1fr;gap:4px;'>"
+        f"<div style='font-size:10px;color:#8895AA;'>👥 Population<br>"
+        f"<span style='font-size:12px;font-weight:700;color:#0A0F1E;'>{pop_fmt}</span></div>"
+        f"<div style='font-size:10px;color:#8895AA;'>💼 Chômage<br>"
+        f"<span style='font-size:12px;font-weight:700;color:#DC2626;'>{cho_fmt}%</span></div>"
+        f"<div style='font-size:10px;color:#8895AA;'>💶 Revenu méd.<br>"
+        f"<span style='font-size:12px;font-weight:700;color:#0A0F1E;'>{rev_fmt} €</span></div>"
+        f"<div style='font-size:10px;color:#8895AA;'>🏠 Prix m²<br>"
+        f"<span style='font-size:12px;font-weight:700;color:#0A0F1E;'>{prix_m2} €</span></div>"
+        f"</div>"
+        # ── Sparklines 2025-2030 ──────────────────────────────────
+        + sparkline_block
+        + f"</div>"
+    )
+
+
+def _build_sparkline_svg(df_timeline: pd.DataFrame, col: str,
+                         color: str, width: int = 220, height: int = 40) -> str:
+    """Génère un mini sparkline SVG pour une colonne de timeline."""
+    vals = df_timeline[col].tolist()
+    years = df_timeline["annee"].tolist()
+    types = df_timeline["type"].tolist()
+    if not vals or max(vals) == min(vals):
+        return ""
+    vmin, vmax = min(vals), max(vals)
+    pad = 6
+    W, H = width - 2*pad, height - 2*pad
+
+    def sx(i): return pad + i * W / max(len(vals)-1, 1)
+    def sy(v): return pad + H - (v - vmin) / (vmax - vmin) * H
+
+    # Ligne historique
+    hist_pts = [(sx(i), sy(v)) for i, (v, t) in enumerate(zip(vals, types)) if t == "Historique"]
+    pred_pts = [(sx(i), sy(v)) for i, (v, t) in enumerate(zip(vals, types)) if t == "Prévision IA"]
+    # Point de jonction
+    join_idx = next((i for i, t in enumerate(types) if t == "Prévision IA"), len(vals)-1)
+    if join_idx > 0:
+        pred_pts = [(sx(join_idx-1), sy(vals[join_idx-1]))] + pred_pts
+
+    def pts_to_path(pts):
+        if len(pts) < 2: return ""
+        d = f"M {pts[0][0]:.1f} {pts[0][1]:.1f}"
+        for x, y in pts[1:]:
+            d += f" L {x:.1f} {y:.1f}"
+        return d
+
+    hist_path = pts_to_path(hist_pts)
+    pred_path = pts_to_path(pred_pts)
+
+    # Dernière valeur
+    last_val = vals[-1]
+    last_lbl = f"{last_val*100:.0f}%" if vmax <= 1 else f"{int(last_val):,}".replace(",", " ")
+
+    svg = (
+        f"<svg width='{width}' height='{height}' xmlns='http://www.w3.org/2000/svg'>"
+        f"<rect width='{width}' height='{height}' rx='4' fill='#F8FAFC'/>"
+    )
+    if hist_path:
+        svg += f"<path d='{hist_path}' fill='none' stroke='{color}' stroke-width='1.8' stroke-linecap='round'/>"
+    if pred_path:
+        svg += (f"<path d='{pred_path}' fill='none' stroke='{color}' stroke-width='1.8' "
+                f"stroke-dasharray='4 3' stroke-linecap='round' opacity='0.7'/>")
+    # Point final
+    if vals:
+        lx, ly = sx(len(vals)-1), sy(vals[-1])
+        svg += f"<circle cx='{lx:.1f}' cy='{ly:.1f}' r='3' fill='{color}'/>"
+        svg += (f"<text x='{lx-2:.1f}' y='{ly-6:.1f}' font-size='8' fill='{color}' "
+                f"font-weight='700' text-anchor='end'>{last_lbl}</text>")
+    svg += "</svg>"
+    return svg
+
+
+def _build_folium_map(df_m: pd.DataFrame, mode_carte: str, show_zones: list,
+                      df_full: pd.DataFrame = None) -> "folium.Map":
+    """Construit la carte Folium satellite avec rendu innovant selon le mode."""
+    from folium.plugins import HeatMap, MarkerCluster
+    import branca.element as be
+
+    lat_c = df_m["latitude"].mean()
+    lon_c = df_m["longitude"].mean()
+
+    ZONE_HEX = {
+        "Zone Prioritaire": "#16A34A",
+        "Zone Favorable":   "#1A56DB",
+        "Zone Possible":    "#F59E0B",
+        "Non Recommandé":   "#94A3B8",
+    }
+    PULSE_COLOR = {
+        "Zone Prioritaire": "0,200,80",
+        "Zone Favorable":   "26,86,219",
+        "Zone Possible":    "245,158,11",
+        "Non Recommandé":   "148,163,184",
+    }
+
+    m = folium.Map(
+        location=[lat_c, lon_c],
+        zoom_start=11,
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri World Imagery",
+        prefer_canvas=True,
+        zoom_control=True,
+    )
+
+    # ── CSS animations pulsation injecté dans la carte ────────────
+    pulse_css = be.Element("""
+    <style>
+    @keyframes pulse-green  { 0%,100%{box-shadow:0 0 0 0 rgba(0,200,80,.6)}  50%{box-shadow:0 0 0 12px rgba(0,200,80,0)} }
+    @keyframes pulse-blue   { 0%,100%{box-shadow:0 0 0 0 rgba(26,86,219,.6)} 50%{box-shadow:0 0 0 12px rgba(26,86,219,0)} }
+    @keyframes pulse-amber  { 0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,.6)}50%{box-shadow:0 0 0 10px rgba(245,158,11,0)} }
+    .pulse-green  { animation: pulse-green  2.0s infinite; }
+    .pulse-blue   { animation: pulse-blue   2.4s infinite; }
+    .pulse-amber  { animation: pulse-amber  2.8s infinite; }
+    .leaflet-popup-content { margin: 4px 8px !important; }
+    .leaflet-popup-content-wrapper { border-radius: 12px !important; padding: 2px !important;
+        box-shadow: 0 8px 32px rgba(10,15,30,.20) !important; border: none !important; }
+    </style>""")
+    m.get_root().html.add_child(pulse_css)
+
+    df_vis = df_m[df_m["cat_custom"].isin(show_zones)] if show_zones else df_m
+
+    if mode_carte == "Heatmap IA":
+        # Heatmap pondérée par score opportunité ML
+        heat_data = [
+            [r["latitude"], r["longitude"], float(r.get("opportunity_score", r["score_custom"]))]
+            for _, r in df_vis.iterrows()
+            if pd.notna(r["latitude"]) and pd.notna(r["longitude"])
+        ]
+        HeatMap(
+            heat_data, radius=28, blur=20, max_zoom=13,
+            gradient={0.15:"#0B1F5C", 0.40:"#1A56DB", 0.65:"#38BDF8", 0.85:"#34D399", 1.0:"#ECFDF5"},
+        ).add_to(m)
+        # Top 20 pulsants par-dessus
+        top20 = df_vis.nlargest(20, "score_custom")
+        for _, row in top20.iterrows():
+            cat = row["cat_custom"]
+            rgb = PULSE_COLOR.get(cat, "148,163,184")
+            hex_col = ZONE_HEX.get(cat, "#94A3B8")
+            icon_html = (
+                f"<div style='width:14px;height:14px;border-radius:50%;"
+                f"background:{hex_col};border:2px solid #fff;cursor:pointer;'></div>"
+            )
+            folium.Marker(
+                location=[row["latitude"], row["longitude"]],
+                icon=folium.DivIcon(html=icon_html, icon_size=(14,14), icon_anchor=(7,7)),
+                popup=folium.Popup(_build_popup_html(row, df_full=df_full), max_width=300, show=False),
+                tooltip=folium.Tooltip(
+                    f"<b>{row['ville']}</b> — {row['score_pct']:.0f}%",
+                    style="font-family:sans-serif;font-size:12px;font-weight:600;"
+                ),
+            ).add_to(m)
+
+    elif mode_carte == "Radar Opportunités":
+        # Cercles pulsants + rayon d'influence = innovation visuelle clé
+        for _, row in df_vis.iterrows():
+            cat     = row["cat_custom"]
+            hex_col = ZONE_HEX.get(cat, "#94A3B8")
+            rgb     = PULSE_COLOR.get(cat, "148,163,184")
+            score   = float(row["score_custom"])
+            opp     = float(row.get("opportunity_score", score))
+            radius_influence = int(opp * 1800 + 300)   # rayon zone d'influence en mètres
+
+            # Cercle d'influence semi-transparent
+            if cat in ("Zone Prioritaire", "Zone Favorable"):
+                folium.Circle(
+                    location=[row["latitude"], row["longitude"]],
+                    radius=radius_influence,
+                    color=hex_col, fill=True, fill_color=hex_col,
+                    fill_opacity=0.07, weight=1, opacity=0.35,
+                    dash_array="6 4",
+                ).add_to(m)
+
+            # Marqueur pulsant central
+            pulse_cls = {
+                "Zone Prioritaire": "pulse-green",
+                "Zone Favorable":   "pulse-blue",
+                "Zone Possible":    "pulse-amber",
+            }.get(cat, "")
+            dot_size = max(8, int(score * 18 + 6))
+            icon_html = (
+                f"<div class='{pulse_cls}' style='width:{dot_size}px;height:{dot_size}px;"
+                f"border-radius:50%;background:{hex_col};border:2px solid #fff;"
+                f"cursor:pointer;position:relative;'>"
+                f"<div style='position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);"
+                f"font-size:{max(7,dot_size//3)}px;font-weight:800;color:#fff;white-space:nowrap;'>"
+                f"{row['score_pct']:.0f}</div></div>"
+            )
+            folium.Marker(
+                location=[row["latitude"], row["longitude"]],
+                icon=folium.DivIcon(
+                    html=icon_html,
+                    icon_size=(dot_size, dot_size),
+                    icon_anchor=(dot_size//2, dot_size//2),
+                ),
+                popup=folium.Popup(_build_popup_html(row, df_full=df_full), max_width=300, show=False),
+                tooltip=folium.Tooltip(
+                    f"<b>{row['ville']}</b><br>Opportunité ML : {opp*100:.0f}%",
+                    style="font-family:sans-serif;font-size:12px;"
+                ),
+            ).add_to(m)
+
+    else:  # Clusters ML
+        cluster_colors = {
+            "Territoire dynamique": "#16A34A",
+            "Zone de vigilance":    "#DC2626",
+            "Désert de services":   "#9333EA",
+            "Potentiel émergent":   "#F59E0B",
+            "Territoire stable":    "#0891B2",
+        }
+        for _, row in df_vis.iterrows():
+            cl      = str(row.get("ml_cluster", "N/A"))
+            hex_col = cluster_colors.get(cl, "#64748B")
+            score   = float(row["score_custom"])
+            dot_size = max(9, int(score * 16 + 7))
+            icon_html = (
+                f"<div style='width:{dot_size}px;height:{dot_size}px;border-radius:50%;"
+                f"background:{hex_col};border:2px solid rgba(255,255,255,0.8);"
+                f"opacity:0.88;cursor:pointer;'></div>"
+            )
+            folium.Marker(
+                location=[row["latitude"], row["longitude"]],
+                icon=folium.DivIcon(
+                    html=icon_html,
+                    icon_size=(dot_size, dot_size),
+                    icon_anchor=(dot_size//2, dot_size//2),
+                ),
+                popup=folium.Popup(_build_popup_html(row, df_full=df_full), max_width=300, show=False),
+                tooltip=folium.Tooltip(
+                    f"<b>{row['ville']}</b><br>🤖 {cl}",
+                    style="font-family:sans-serif;font-size:12px;"
+                ),
+            ).add_to(m)
+
+    # ── Légende flottante intégrée dans la carte ──────────────────
+    if mode_carte == "Clusters ML":
+        legend_items = [
+            ("#16A34A","Territoire dynamique"), ("#DC2626","Zone de vigilance"),
+            ("#9333EA","Désert de services"),   ("#F59E0B","Potentiel émergent"),
+            ("#0891B2","Territoire stable"),
+        ]
+    else:
+        legend_items = [
+            ("#16A34A","Zone Prioritaire ≥70%"), ("#1A56DB","Zone Favorable ≥50%"),
+            ("#F59E0B","Zone Possible ≥30%"),    ("#94A3B8","Non recommandé"),
+        ]
+
+    legend_rows = "".join(
+        f"<div style='display:flex;align-items:center;gap:6px;margin:3px 0;'>"
+        f"<div style='width:10px;height:10px;border-radius:50%;background:{c};flex-shrink:0;'></div>"
+        f"<span style='font-size:10px;color:#1E293B;'>{lbl}</span></div>"
+        for c, lbl in legend_items
+    )
+    legend_html = f"""
+    <div style='position:fixed;bottom:28px;left:12px;z-index:9999;
+         background:rgba(255,255,255,0.94);border-radius:10px;
+         padding:10px 13px;box-shadow:0 4px 16px rgba(10,15,30,.18);
+         border:1px solid #E2E8F2;backdrop-filter:blur(6px);min-width:170px;'>
+      <div style='font-size:9px;font-weight:800;color:#8895AA;text-transform:uppercase;
+           letter-spacing:.8px;margin-bottom:6px;'>{"Profil ML" if mode_carte=="Clusters ML" else "Zone d'opportunité"}</div>
+      {legend_rows}
+    </div>"""
+    m.get_root().html.add_child(be.Element(legend_html))
+
+    # ── Badge ICEBERG flottant ─────────────────────────────────────
+    badge_html = """
+    <div style='position:fixed;top:10px;right:10px;z-index:9999;
+         background:linear-gradient(135deg,#0B1F5C,#1A56DB);
+         border-radius:10px;padding:7px 12px;
+         box-shadow:0 4px 14px rgba(26,86,219,.40);'>
+      <span style='font-size:11px;font-weight:800;color:#fff;letter-spacing:.3px;'>
+        🧊 ICEBERG · Radar IA</span>
+    </div>"""
+    m.get_root().html.add_child(be.Element(badge_html))
+
+    return m
+
+
 def page_attractivite(df: pd.DataFrame):
     # Breadcrumb
     st.markdown("""
     <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:#8895AA;
          margin-bottom:14px;font-weight:600;">
       <span>Île-de-France</span><span>›</span><span>91 &amp; 94</span>
-      <span>›</span><span style="color:#0A0F1E;">Carte territoriale</span>
+      <span>›</span><span style="color:#0A0F1E;">Radar Territoire Vivant</span>
     </div>""", unsafe_allow_html=True)
 
+    page_header("🎯", "Radar Territoire Vivant",
+                "Carte satellite IA · Opportunités ML prédictives · 241 communes · Dép. 91 & 94",
+                badge="ML Prédictif")
+
+    # ── Enrichissement ML ─────────────────────────────────────────
+    df = build_ml_features(df)
+
     nb_alertes = len(df[df["cat_signal_faible"]=="Signal Fort"])
+    n_prio_ml  = len(df[df["opportunity_score"] >= 0.70]) if "opportunity_score" in df.columns else 0
+
+    # ── Bannière alertes ──────────────────────────────────────────
     st.markdown(f"""
-    <div style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:13px;
-         padding:13px 18px;margin-bottom:18px;display:flex;align-items:center;
-         justify-content:space-between;">
-      <div style="display:flex;align-items:center;gap:8px;">
-        <span style="font-size:15px;">✨</span>
-        <span style="font-size:12px;font-weight:500;color:#92400E;">
-          <b>{nb_alertes} signaux d'alerte</b> détectés dans les dép. 91 &amp; 94
-        </span>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;margin-bottom:18px;">
+      <div style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:12px;padding:11px 15px;">
+        <div style="font-size:10px;font-weight:700;color:#92400E;text-transform:uppercase;letter-spacing:.6px;">⚡ Signaux forts</div>
+        <div style="font-size:22px;font-weight:800;color:#D97706;">{nb_alertes}</div>
       </div>
-      <span style="font-size:11px;color:#B45309;font-weight:700;background:#FEF3C7;
-            padding:4px 13px;border-radius:20px;border:1px solid #FDE68A;">Voir alertes →</span>
+      <div style="background:#D1FAE5;border:1px solid #6EE7B7;border-radius:12px;padding:11px 15px;">
+        <div style="font-size:10px;font-weight:700;color:#065F46;text-transform:uppercase;letter-spacing:.6px;">🎯 Opportunités ML</div>
+        <div style="font-size:22px;font-weight:800;color:#059669;">{n_prio_ml}</div>
+      </div>
+      <div style="background:#EDE9FE;border:1px solid #C4B5FD;border-radius:12px;padding:11px 15px;">
+        <div style="font-size:10px;font-weight:700;color:#4C1D95;text-transform:uppercase;letter-spacing:.6px;">🤖 Modèle</div>
+        <div style="font-size:13px;font-weight:800;color:#6D28D9;">Gradient Boosting</div>
+      </div>
+      <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:12px;padding:11px 15px;">
+        <div style="font-size:10px;font-weight:700;color:#1E40AF;text-transform:uppercase;letter-spacing:.6px;">📅 Horizon</div>
+        <div style="font-size:22px;font-weight:800;color:#1A56DB;">2026</div>
+      </div>
     </div>""", unsafe_allow_html=True)
 
     col_map, col_panel = st.columns([3, 1])
 
     with col_map:
+        # ── Contrôles carte ───────────────────────────────────────
         c1, c2, c3 = st.columns([2, 1, 1])
         with c1:
             type_projet = st.selectbox("", [
@@ -1032,8 +1715,8 @@ def page_attractivite(df: pd.DataFrame):
             dept_sel = st.selectbox("", ["Toute la zone","Essonne (91)","Val-de-Marne (94)"],
                                     label_visibility="collapsed", key="dept_attr")
         with c3:
-            mode_carte = st.radio("", ["Heatmap","3D Colonnes","Scatter"], horizontal=True,
-                                  label_visibility="collapsed")
+            mode_carte = st.radio("", ["Radar Opportunités","Heatmap IA","Clusters ML"],
+                                  horizontal=True, label_visibility="collapsed")
 
         presets = {
             "🛒 Commerce / Grande surface":(60,40),"🏥 Médecin / Cabinet médical":(25,75),
@@ -1046,123 +1729,176 @@ def page_attractivite(df: pd.DataFrame):
             pf = st.slider("Poids foncier (%)", 0, 100, 50, 10)
             pe = 100 - pf
 
-        df["score_custom"] = (df["score_reindustrialisation"]*(pf/100) + df["score_employabilite"]*(pe/100))
-        mn, mx = df["score_custom"].min(), df["score_custom"].max()
-        if mx > mn: df["score_custom"] = (df["score_custom"]-mn)/(mx-mn)
-        df["score_custom"] = df["score_custom"].clip(0,1).fillna(0)
-        df["cat_custom"] = df["score_custom"].apply(
-            lambda s: "Zone Prioritaire" if s>=.70 else ("Zone Favorable" if s>=.50 else ("Zone Possible" if s>=.30 else "Non Recommandé")))
+        # ── Filtre zones (boutons inline) ─────────────────────────
+        all_zones = ["Zone Prioritaire","Zone Favorable","Zone Possible","Non Recommandé"]
+        zone_key  = f"zones_filter_{dept_sel}_{type_projet}"
+        if zone_key not in st.session_state:
+            st.session_state[zone_key] = all_zones.copy()
 
-        df_m = df.dropna(subset=["latitude","longitude"]).copy()
-        if "91" in dept_sel: df_m = df_m[df_m["code_dept"].astype(str)=="91"]
-        elif "94" in dept_sel: df_m = df_m[df_m["code_dept"].astype(str)=="94"]
-
-        df_m["color"]     = df_m["cat_custom"].apply(lambda c: ZONE_COLORS.get(c, [203,213,225,160]))
-        df_m["elevation"] = df_m["score_custom"] * 3200
-        df_m["score_pct"] = (df_m["score_custom"]*100).round(1)
-        df_m["pop_fmt"]   = df_m["population"].apply(safe_val)
-        df_m["cho_fmt"]   = df_m["taux_chomage"].apply(lambda x: safe_val(x,1))
-        df_m["rev_fmt"]   = df_m["revenu_median"].apply(safe_val)
-
-        view = pdk.ViewState(latitude=df_m["latitude"].mean(), longitude=df_m["longitude"].mean(),
-                             zoom=10, pitch=45 if mode_carte=="3D Colonnes" else 35, bearing=0)
-        tooltip = {
-            "html": (
-                '<div style="font-family:Plus Jakarta Sans,sans-serif;background:#fff;'
-                'padding:14px 16px;border-radius:13px;border:1px solid #E2E8F2;min-width:200px;'
-                'box-shadow:0 6px 20px rgba(10,15,30,.14);">'
-                '<b style="font-size:14px;color:#0A0F1E;">{ville}</b>'
-                '<div style="margin:5px 0 8px;">'
-                '<span style="background:#EBF1FF;color:#1344B8;padding:2px 8px;'
-                'border-radius:20px;font-size:11px;font-weight:700;">{cat_custom}</span>'
-                '<span style="font-size:13px;font-weight:700;color:#0A0F1E;margin-left:7px;">{score_pct}%</span>'
-                '</div><hr style="border:none;border-top:1px solid #F0F4F8;margin:6px 0;"/>'
-                '<div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;font-size:12px;">'
-                '<div><span style="color:#8895AA;font-size:10px;display:block;">POP.</span>'
-                '<b style="color:#3D4A63;">{pop_fmt}</b></div>'
-                '<div><span style="color:#8895AA;font-size:10px;display:block;">CHÔMAGE</span>'
-                '<b style="color:#3D4A63;">{cho_fmt}%</b></div>'
-                '<div><span style="color:#8895AA;font-size:10px;display:block;">REVENU MÉD.</span>'
-                '<b style="color:#3D4A63;">{rev_fmt} €</b></div>'
-                '</div></div>'
-            ),
-            "style": {"backgroundColor":"transparent","padding":"0"}
+        st.markdown("<div style='font-size:10px;font-weight:700;color:#8895AA;text-transform:uppercase;"
+                    "letter-spacing:.7px;margin:8px 0 4px;'>Filtrer les zones affichées</div>",
+                    unsafe_allow_html=True)
+        zc1, zc2, zc3, zc4 = st.columns(4)
+        zone_btns = {
+            "Zone Prioritaire": (zc1, "🟢 Prioritaire", "#16A34A"),
+            "Zone Favorable":   (zc2, "🔵 Favorable",   "#1A56DB"),
+            "Zone Possible":    (zc3, "🟡 Possible",    "#D97706"),
+            "Non Recommandé":   (zc4, "⚪ Non reco.",   "#64748B"),
         }
+        for zone, (col, lbl, _) in zone_btns.items():
+            with col:
+                active = zone in st.session_state[zone_key]
+                if st.button(lbl, key=f"btn_{zone}_{zone_key}",
+                             use_container_width=True,
+                             type="primary" if active else "secondary"):
+                    if active:
+                        if len(st.session_state[zone_key]) > 1:
+                            st.session_state[zone_key].remove(zone)
+                    else:
+                        st.session_state[zone_key].append(zone)
+                    st.rerun()
 
-        if mode_carte == "Heatmap":
-            df_m["weight"] = df_m["score_custom"]
-            layers = [
-                pdk.Layer("HeatmapLayer", data=df_m,
-                    get_position="[longitude, latitude]", get_weight="weight",
-                    radiusPixels=70, intensity=1.4, threshold=0.08,
-                    color_range=[[240,249,255,0],[147,210,255,100],[59,130,246,200],[26,86,219,255]]),
-                pdk.Layer("ScatterplotLayer", data=df_m.nlargest(15,"score_custom"),
-                    get_position="[longitude, latitude]", get_color="[26,86,219,180]",
-                    get_radius=300, pickable=True, auto_highlight=True),
-            ]
-        elif mode_carte == "3D Colonnes":
-            layers = [
-                pdk.Layer("ColumnLayer", data=df_m,
-                    get_position="[longitude, latitude]", get_elevation="elevation",
-                    elevation_scale=1, radius=260, get_fill_color="color",
-                    pickable=True, auto_highlight=True, coverage=0.88,
-                    extruded=True),
-            ]
-        else:  # Scatter
-            df_m["radius"] = (df_m["score_custom"] * 800 + 200).astype(int)
-            layers = [
-                pdk.Layer("ScatterplotLayer", data=df_m,
-                    get_position="[longitude, latitude]", get_color="color",
-                    get_radius="radius", pickable=True, auto_highlight=True,
-                    opacity=0.85),
-            ]
+        show_zones = st.session_state[zone_key]
 
-        st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view, tooltip=tooltip,
-            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"),
-            use_container_width=True)
+    # ── Slider temporel ───────────────────────────────────────────
+    st.markdown(
+        "<div style='font-size:10px;font-weight:700;color:#8895AA;text-transform:uppercase;"
+        "letter-spacing:.7px;margin:4px 0 2px;'>🕐 Horizon temporel de projection</div>",
+        unsafe_allow_html=True
+    )
+    sc1, sc2 = st.columns([4, 1])
+    with sc1:
+        annee_sel = st.slider(
+            "", min_value=2025, max_value=2030, value=2025, step=1,
+            label_visibility="collapsed", key="slider_annee_carte"
+        )
+    with sc2:
+        delta_annee = annee_sel - 2025
+        badge_color = "#059669" if delta_annee == 0 else ("#1A56DB" if delta_annee <= 2 else "#7C3AED")
+        st.markdown(
+            f"<div style='background:{badge_color};color:#fff;border-radius:10px;"
+            f"padding:8px 0;text-align:center;font-size:15px;font-weight:800;margin-top:2px;'>"
+            f"{'Actuel' if delta_annee==0 else f'+{delta_annee} ans'}<br>"
+            f"<span style='font-size:20px;font-weight:900;'>{annee_sel}</span></div>",
+            unsafe_allow_html=True
+        )
 
-        # Légende
-        st.markdown("""
-        <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;background:#fff;
-             padding:10px 16px;border-radius:12px;border:1px solid #E2E8F2;margin-top:10px;">
-          <span style="font-size:9px;font-weight:700;color:#8895AA;text-transform:uppercase;letter-spacing:.6px;">Légende</span>
-          <div style="display:flex;align-items:center;gap:5px;"><div style="width:9px;height:9px;border-radius:50%;background:#16A34A;"></div><span style="font-size:11px;color:#3D4A63;">Prioritaire</span></div>
-          <div style="display:flex;align-items:center;gap:5px;"><div style="width:9px;height:9px;border-radius:50%;background:#3B82F6;"></div><span style="font-size:11px;color:#3D4A63;">Favorable</span></div>
-          <div style="display:flex;align-items:center;gap:5px;"><div style="width:9px;height:9px;border-radius:50%;background:#FBBF24;"></div><span style="font-size:11px;color:#3D4A63;">Possible</span></div>
-          <div style="display:flex;align-items:center;gap:5px;"><div style="width:9px;height:9px;border-radius:50%;background:#CBD5E1;border:1px solid #94A3B8;"></div><span style="font-size:11px;color:#3D4A63;">Non recommandé</span></div>
-        </div>""", unsafe_allow_html=True)
+    if annee_sel > 2025:
+        st.markdown(
+            f"<div style='background:linear-gradient(90deg,#EDE9FE,#F5F3FF);border:1px solid #C4B5FD;"
+            f"border-radius:9px;padding:7px 14px;margin-bottom:8px;font-size:11px;color:#5B21B6;"
+            f"display:flex;align-items:center;gap:7px;'>"
+            f"<span style='font-size:14px;'>🔮</span>"
+            f"<span><b>Projection IA {annee_sel}</b> — Zones recalculées par Gradient Boosting "
+            f"selon les tendances ML de chaque profil. Popups : trajectoire 2025→2030.</span>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+        df_proj = project_df_to_year(df, annee_sel)
+    else:
+        df_proj = df.copy()
 
+    # ── Calcul scores sur df_proj (AVANT le split col_map/col_panel) ──
+    df_proj["score_custom"] = (
+        df_proj["score_reindustrialisation"]*(pf/100) +
+        df_proj["score_employabilite"]*(pe/100)
+    )
+    mn, mx = df_proj["score_custom"].min(), df_proj["score_custom"].max()
+    if mx > mn: df_proj["score_custom"] = (df_proj["score_custom"]-mn)/(mx-mn)
+    df_proj["score_custom"] = df_proj["score_custom"].clip(0,1).fillna(0)
+    df_proj["cat_custom"] = df_proj["score_custom"].apply(
+        lambda s: "Zone Prioritaire" if s>=.70 else
+                  ("Zone Favorable"  if s>=.50 else
+                  ("Zone Possible"   if s>=.30 else "Non Recommandé"))
+    )
+
+    df_m = df_proj.dropna(subset=["latitude","longitude"]).copy()
+    if "91" in dept_sel:  df_m = df_m[df_m["code_dept"].astype(str)=="91"]
+    elif "94" in dept_sel: df_m = df_m[df_m["code_dept"].astype(str)=="94"]
+
+    df_m["score_pct"] = (df_m["score_custom"]*100).round(1)
+    df_m["pop_fmt"]   = df_m["population"].apply(safe_val)
+    df_m["cho_fmt"]   = df_m["taux_chomage"].apply(lambda x: safe_val(x,1))
+    df_m["rev_fmt"]   = df_m["revenu_median"].apply(safe_val)
+
+    # ── Rendu carte + panneau ─────────────────────────────────────
+    with col_map:
+        if _FOLIUM_OK:
+            folium_map = _build_folium_map(df_m, mode_carte, show_zones, df_full=df)
+            st_folium(folium_map, width=None, height=560,
+                      use_container_width=True, returned_objects=[])
+        else:
+            st.error("⚠️ Folium non installé : `pip install folium streamlit-folium`")
+
+    # ── Panneau latéral ───────────────────────────────────────────
     with col_panel:
-        # Métriques clés
-        moy_cho = df["taux_chomage"].mean()
-        n_prio  = len(df[df["cat_custom"]=="Zone Prioritaire"])
-        score_t = int(df["score_attractivite"].mean()*100)
-        nb_cr   = int(df["nb_entreprises_actives"].sum()*0.08)
+        moy_cho = df_proj["taux_chomage"].mean()
+        n_prio  = len(df_proj[df_proj["cat_custom"]=="Zone Prioritaire"])
+        score_t = int(df_proj["score_attractivite"].mean()*100)
+        nb_cr   = int(df_proj["nb_entreprises_actives"].sum()*0.08)
 
         for lbl, val, delta, color in [
-            ("Taux chômage", f"{moy_cho:.1f}%", "↗ +0,3 pts", "#DC2626"),
-            ("Zones prioritaires", str(n_prio), "", "#059669"),
-            ("Score territorial", f"{score_t}/100", "", "#1A56DB"),
-            ("Créations (est.)", safe_val(nb_cr), "↗ +12 ce mois", "#059669"),
+            ("Taux chômage",     f"{moy_cho:.1f}%",  "↗ +0,3 pts",   "#DC2626"),
+            ("Zones prioritaires", str(n_prio),       "",              "#059669"),
+            ("Score territorial",  f"{score_t}/100",  "",              "#1A56DB"),
+            ("Créations (est.)",   safe_val(nb_cr),   "↗ +12 ce mois","#059669"),
         ]:
             st.markdown(metric_card(lbl, val, delta, color), unsafe_allow_html=True)
             st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-        # Panel signaux faibles
-        top_sig = df.nlargest(12,"score_signal_faible")[
-            ["ville","cat_signal_faible","score_signal_faible","taux_chomage","taux_pauvrete"]
+        # Top 5 opportunités ML
+        top_opp = df.nlargest(5, "opportunity_score")[
+            ["ville","opportunity_score","ml_cluster","pred_attractivite_2026"]
         ].to_dict("records")
-        nb_fort = len(df[df["cat_signal_faible"]=="Signal Fort"])
+        st.markdown(
+            '<div style="background:#fff;border:1px solid #E2E8F2;border-radius:14px;'
+            'overflow:hidden;margin-top:4px;">'
+            '<div style="padding:11px 14px;border-bottom:1px solid #F0F4F8;display:flex;'
+            'align-items:center;justify-content:space-between;">'
+            '<span style="font-size:12px;font-weight:700;color:#0A0F1E;">🎯 Top Opportunités ML</span>'
+            f'<span style="background:#EDE9FE;color:#6D28D9;padding:2px 8px;'
+            f'border-radius:20px;font-size:10px;font-weight:700;">2026</span>'
+            '</div>',
+            unsafe_allow_html=True
+        )
+        for r in top_opp:
+            opp_pct  = int(r["opportunity_score"]*100)
+            pred_pct = int(r["pred_attractivite_2026"]*100)
+            cl       = r["ml_cluster"]
+            cl_color = {"Territoire dynamique":"#059669","Zone de vigilance":"#DC2626",
+                        "Potentiel émergent":"#D97706","Territoire stable":"#0891B2",
+                        "Désert de services":"#7C3AED"}.get(cl,"#64748B")
+            st.markdown(
+                f'<div style="padding:9px 12px;border-bottom:1px solid #F8FAFC;">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">'
+                f'<span style="font-size:12px;font-weight:700;color:#0A0F1E;">{r["ville"]}</span>'
+                f'<span style="font-size:13px;font-weight:800;color:#1A56DB;">{opp_pct}%</span>'
+                f'</div>'
+                f'<div style="display:flex;gap:5px;flex-wrap:wrap;">'
+                f'<span style="background:{cl_color}22;color:{cl_color};padding:1px 7px;'
+                f'border-radius:20px;font-size:9px;font-weight:700;">🤖 {cl[:18]}</span>'
+                f'<span style="background:#D1FAE5;color:#059669;padding:1px 7px;'
+                f'border-radius:20px;font-size:9px;font-weight:700;">🔮 {pred_pct}% en 2026</span>'
+                f'</div>'
+                f'<div style="background:#F0F4F8;border-radius:4px;height:4px;margin-top:5px;overflow:hidden;">'
+                f'<div style="width:{opp_pct}%;height:4px;background:linear-gradient(90deg,#0B1F5C,#3B82F6);'
+                f'border-radius:4px;"></div></div>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
 
+        # Signaux faibles
+        top_sig  = df_proj.nlargest(8,"score_signal_faible")[
+            ["ville","cat_signal_faible","score_signal_faible","taux_chomage"]
+        ].to_dict("records")
+        nb_fort  = len(df_proj[df_proj["cat_signal_faible"]=="Signal Fort"])
         st.markdown(
             f'<div style="background:#fff;border:1px solid #E2E8F2;border-radius:14px;'
-            f'overflow:hidden;box-shadow:0 1px 3px rgba(10,15,30,.04);">'
-            f'<div style="padding:12px 14px;border-bottom:1px solid #F0F4F8;display:flex;'
+            f'overflow:hidden;margin-top:10px;">'
+            f'<div style="padding:11px 14px;border-bottom:1px solid #F0F4F8;display:flex;'
             f'align-items:center;justify-content:space-between;">'
-            f'<div style="display:flex;align-items:center;gap:6px;">'
-            f'<span style="font-size:13px;">⚡</span>'
-            f'<span style="font-size:12px;font-weight:700;color:#0A0F1E;">Signaux IA</span>'
-            f'</div>'
+            f'<span style="font-size:12px;font-weight:700;color:#0A0F1E;">⚡ Signaux IA</span>'
             f'<span style="background:#FEE2E2;color:#DC2626;padding:2px 8px;'
             f'border-radius:20px;font-size:10px;font-weight:700;">{nb_fort} alertes</span>'
             f'</div>',
@@ -1171,15 +1907,12 @@ def page_attractivite(df: pd.DataFrame):
         for s in top_sig:
             clr = "#DC2626" if s["cat_signal_faible"]=="Signal Fort" else "#D97706"
             pct = int(s["score_signal_faible"]*100)
-            cho = s.get("taux_chomage",0); pauv = s.get("taux_pauvrete",0)
-            desc = f"Chômage {cho:.1f}% · Pauvreté {pauv:.1f}%"
             st.markdown(
                 f'<div style="display:flex;align-items:center;justify-content:space-between;'
-                f'padding:9px 12px;border-bottom:1px solid #F8FAFC;">'
+                f'padding:8px 12px;border-bottom:1px solid #F8FAFC;">'
                 f'<div style="display:flex;align-items:center;gap:7px;">'
                 f'<div style="width:6px;height:6px;border-radius:50%;background:{clr};flex-shrink:0;"></div>'
-                f'<div><div style="font-size:12px;font-weight:600;color:#0A0F1E;">{s["ville"]}</div>'
-                f'<div style="font-size:10px;color:#8895AA;">{desc}</div></div></div>'
+                f'<span style="font-size:12px;font-weight:600;color:#0A0F1E;">{s["ville"]}</span></div>'
                 f'<span style="background:{"#FEE2E2" if clr=="#DC2626" else "#FEF3C7"};'
                 f'color:{clr};padding:1px 7px;border-radius:20px;font-size:10px;font-weight:700;">{pct}%</span>'
                 f'</div>',
@@ -1187,23 +1920,27 @@ def page_attractivite(df: pd.DataFrame):
             )
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Tableau top 10
+    # ── Tableau Top 10 ────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("#### Top 10 zones les plus attractives")
-    top10 = df.nlargest(10,"score_custom")[
-        ["ville","dept_nom","score_custom","cat_custom","taux_chomage","prix_m2_median","population"]
+    st.markdown("#### 🏆 Top 10 opportunités territoriales — Score ML combiné")
+    top10 = df_proj.nlargest(10,"opportunity_score")[
+        ["ville","dept_nom","score_custom","cat_custom","opportunity_score",
+         "pred_attractivite_2026","risk_score","ml_cluster","taux_chomage","population"]
     ].copy()
-    top10.columns = ["Commune","Département","Score","Zone","Chômage %","Prix m²","Population"]
-    top10["Score"] = top10["Score"].round(3)
+    top10.columns = ["Commune","Département","Score","Zone","🎯 Opportunité ML",
+                     "🔮 Pred.2026","⚠️ Risque","🤖 Profil ML","Chômage %","Population"]
+    for col in ["Score","🎯 Opportunité ML","🔮 Pred.2026","⚠️ Risque"]:
+        top10[col] = (top10[col]*100).round(1).astype(str) + "%"
     st.dataframe(top10.reset_index(drop=True), use_container_width=True)
     c1, c2 = st.columns(2)
     with c1:
         st.download_button("⬇️ Top 10 CSV", top10.to_csv(index=False, encoding="utf-8-sig"),
-                           "top10_attractivite.csv", "text/csv", use_container_width=True)
+                           "top10_opportunites_ml.csv", "text/csv", use_container_width=True)
     with c2:
-        all_s = df[["ville","dept_nom","score_custom","cat_custom"]].sort_values("score_custom",ascending=False).copy()
+        all_s = df_proj[["ville","dept_nom","score_custom","cat_custom","opportunity_score","ml_cluster"]
+                   ].sort_values("opportunity_score",ascending=False).copy()
         st.download_button("⬇️ Toutes les communes", all_s.to_csv(index=False,encoding="utf-8-sig"),
-                           "toutes_communes.csv", "text/csv", use_container_width=True)
+                           "toutes_communes_ml.csv", "text/csv", use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1516,7 +2253,7 @@ def page_predictions_ml(df: pd.DataFrame):
         st.pydeck_chart(pdk.Deck(
             layers=[layer_cl], initial_view_state=view_cl,
             tooltip={"html":"<b>{ville}</b><br><span style='color:#ccc;font-size:11px;'>{ml_cluster}</span><br><i style='font-size:10px;'>{cluster_desc}</i>"},
-            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"),
+            map_style="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"),
             use_container_width=True)
 
         # Tableau détail
@@ -1604,7 +2341,7 @@ def page_deserts(df: pd.DataFrame):
                  "style":{"backgroundColor":"transparent","padding":"0"}}
     if layers:
         st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view, tooltip=tooltip_d,
-            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"),
+            map_style="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"),
             use_container_width=True)
     else:
         st.info("Sélectionnez au moins un type de désert.")
@@ -2035,7 +2772,7 @@ def page_communes(df: pd.DataFrame):
             ],
             initial_view_state=view_c,
             tooltip={"html":"<b>{ville}</b><br><span style='color:#ccc;font-size:11px;'>{dept}</span>"},
-            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"),
+            map_style="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"),
             use_container_width=True)
 
         # Tableau comparaison
@@ -2181,6 +2918,404 @@ def page_assistant(df: pd.DataFrame):
 # ══════════════════════════════════════════════════════════════════
 # 17. MAIN — ROUTEUR
 # ══════════════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════════════
+# RAPPORT ZONES PRIORITAIRES — Directeur uniquement
+# ══════════════════════════════════════════════════════════════════
+def _generate_rapport_html(titre: str, sous_titre: str, intro: str,
+                           methodologie: str, rows_html: str,
+                           sources: list, date_str: str) -> str:
+    sources_html = "".join(
+        f"<tr><td style='padding:6px 10px;font-weight:600;color:#1E293B;border-bottom:1px solid #F0F4F8;'>"
+        f"[{i+1}]</td>"
+        f"<td style='padding:6px 10px;border-bottom:1px solid #F0F4F8;color:#475569;'>{s['nom']}</td>"
+        f"<td style='padding:6px 10px;border-bottom:1px solid #F0F4F8;color:#475569;font-style:italic;'>{s['desc']}</td>"
+        f"<td style='padding:6px 10px;border-bottom:1px solid #F0F4F8;'>"
+        f"<span style='color:#1A56DB;'>{s['url']}</span></td></tr>"
+        for i, s in enumerate(sources)
+    )
+    return f"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
+<style>
+  * {{ box-sizing:border-box; margin:0; padding:0; }}
+  body {{ font-family:'Segoe UI',Arial,sans-serif; background:#fff; color:#1E293B; font-size:13px; }}
+  .cover {{ background:linear-gradient(135deg,#0B1F5C,#1A56DB); color:#fff;
+            padding:52px 60px 44px; page-break-after:always; }}
+  .cover h1 {{ font-size:32px; font-weight:800; letter-spacing:-.5px; margin-bottom:8px; }}
+  .cover .sub {{ font-size:15px; opacity:.8; margin-bottom:32px; }}
+  .cover .badge {{ display:inline-block; background:rgba(255,255,255,.15);
+                   border-radius:20px; padding:4px 16px; font-size:11px;
+                   font-weight:700; letter-spacing:.5px; margin-right:8px; }}
+  .cover .meta {{ margin-top:36px; font-size:11px; opacity:.6; }}
+  .body {{ padding:44px 60px; }}
+  h2 {{ font-size:18px; font-weight:800; color:#0B1F5C; margin:28px 0 10px;
+        border-bottom:3px solid #1A56DB; padding-bottom:6px; }}
+  h3 {{ font-size:14px; font-weight:700; color:#1E293B; margin:18px 0 6px; }}
+  p {{ line-height:1.7; color:#475569; margin-bottom:10px; }}
+  .intro-box {{ background:#EFF6FF; border-left:4px solid #1A56DB; border-radius:0 8px 8px 0;
+                padding:14px 18px; margin:16px 0 22px; }}
+  .methodo {{ background:#F8FAFC; border:1px solid #E2E8F2; border-radius:10px;
+              padding:16px 20px; margin:16px 0 22px; }}
+  table {{ width:100%; border-collapse:collapse; margin:12px 0; font-size:12px; }}
+  th {{ background:#0B1F5C; color:#fff; padding:9px 12px; text-align:left;
+        font-weight:700; font-size:11px; text-transform:uppercase; letter-spacing:.5px; }}
+  td {{ padding:8px 12px; border-bottom:1px solid #F0F4F8; vertical-align:top; }}
+  tr:nth-child(even) td {{ background:#F8FAFC; }}
+  .score-badge {{ display:inline-block; border-radius:20px; padding:2px 10px;
+                  font-size:11px; font-weight:700; }}
+  .green {{ background:#D1FAE5; color:#065F46; }}
+  .amber {{ background:#FEF3C7; color:#92400E; }}
+  .red   {{ background:#FEE2E2; color:#991B1B; }}
+  .footer {{ margin-top:40px; padding-top:16px; border-top:2px solid #E2E8F2;
+             font-size:10px; color:#94A3B8; display:flex; justify-content:space-between; }}
+  .src-table th {{ background:#F1F5F9; color:#0B1F5C; }}
+  @media print {{ .cover {{ page-break-after:always; }} }}
+</style></head><body>
+<div class="cover">
+  <div style="font-size:11px;font-weight:700;letter-spacing:2px;opacity:.6;margin-bottom:16px;text-transform:uppercase;">ICEBERG v5.0 · Intelligence Territoriale · Dép. 91 &amp; 94</div>
+  <h1>{titre}</h1>
+  <div class="sub">{sous_titre}</div>
+  <div><span class="badge">CONFIDENTIEL</span><span class="badge">Directeur d'Agence</span><span class="badge">ML Prédictif</span></div>
+  <div class="meta">Généré le {date_str} · Modèle Gradient Boosting · 241 communes analysées</div>
+</div>
+<div class="body">
+  <h2>1. Introduction &amp; Contexte</h2>
+  <div class="intro-box"><p>{intro}</p></div>
+  <h2>2. Méthodologie</h2>
+  <div class="methodo">{methodologie}</div>
+  <h2>3. Résultats détaillés</h2>
+  {rows_html}
+  <h2>4. Sources &amp; Références</h2>
+  <table class="src-table">
+    <tr><th>#</th><th>Source</th><th>Description</th><th>Référence</th></tr>
+    {sources_html}
+  </table>
+  <div class="footer">
+    <span>ICEBERG v5.0 · Rapport confidentiel · Usage interne Directeur d'Agence</span>
+    <span>Généré le {date_str}</span>
+  </div>
+</div></body></html>"""
+
+
+def page_rapport_prioritaires(df: pd.DataFrame):
+    page_header("📋", "Rapport Zones Prioritaires",
+                "Analyse détaillée · Données ML · Export PDF — Accès Directeur",
+                badge="Confidentiel")
+
+    df = build_ml_features(df)
+    df_p = df[df["cat_attractivite"] == "Zone Prioritaire"].copy()
+    df_p["score_pct"] = (df_p["score_attractivite"]*100).round(1)
+    df_p["opp_pct"]   = (df_p["opportunity_score"]*100).round(1)
+    df_p["pred_pct"]  = (df_p["pred_attractivite_2026"]*100).round(1)
+    df_p = df_p.sort_values("score_attractivite", ascending=False)
+
+    # ── Bannière ──────────────────────────────────────────────────
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#D1FAE5,#ECFDF5);border:1px solid #6EE7B7;
+         border-radius:14px;padding:16px 22px;margin-bottom:22px;display:flex;
+         align-items:center;gap:16px;">
+      <div style="font-size:36px;">🟢</div>
+      <div>
+        <div style="font-size:20px;font-weight:800;color:#065F46;">{len(df_p)} communes prioritaires</div>
+        <div style="font-size:13px;color:#047857;margin-top:2px;">Score attractivité ≥ 70% · Opportunité d'investissement immédiate · Dép. 91 &amp; 94</div>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    # ── Tableau interactif ────────────────────────────────────────
+    st.markdown("#### 📊 Tableau complet des zones prioritaires")
+    cols_show = ["ville","dept_nom","score_pct","opp_pct","pred_pct",
+                 "taux_chomage","revenu_median","population","prix_m2_median","ml_cluster"]
+    cols_rename = {"ville":"Commune","dept_nom":"Département","score_pct":"Score %",
+                   "opp_pct":"Opportunité ML %","pred_pct":"Prédiction 2026 %",
+                   "taux_chomage":"Chômage %","revenu_median":"Revenu méd. €",
+                   "population":"Population","prix_m2_median":"Prix m²","ml_cluster":"Profil ML"}
+    df_show = df_p[[c for c in cols_show if c in df_p.columns]].rename(columns=cols_rename)
+    st.dataframe(df_show.reset_index(drop=True), use_container_width=True, height=400)
+
+    # ── Fiches détaillées ─────────────────────────────────────────
+    st.markdown("#### 🔍 Fiches analytiques détaillées")
+    for _, row in df_p.iterrows():
+        secteurs = _compute_secteurs(row)
+        top3_sec = secteurs[:3]
+        with st.expander(f"🟢 {row['ville']} — {row['score_pct']:.0f}% · {row.get('dept_nom','')}"):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Score attractivité", f"{row['score_pct']:.0f}%")
+            c2.metric("Opportunité ML",     f"{row['opp_pct']:.0f}%")
+            c3.metric("Prédiction 2026",    f"{row['pred_pct']:.0f}%")
+            c4.metric("Profil ML",          str(row.get("ml_cluster","N/A")))
+            st.markdown("**Pourquoi cette commune est prioritaire :**")
+            reasons = []
+            if row["score_attractivite"] >= 0.80: reasons.append("✅ Score attractivité exceptionnel (≥ 80%)")
+            elif row["score_attractivite"] >= 0.70: reasons.append("✅ Score attractivité élevé (≥ 70%)")
+            if row.get("taux_chomage", 15) < 10: reasons.append(f"✅ Faible chômage ({row['taux_chomage']:.1f}%) — bassin d'emploi sain")
+            if row.get("revenu_median", 0) > 28000: reasons.append(f"✅ Revenu médian élevé ({int(row.get('revenu_median',0)):,} €) — pouvoir d'achat fort")
+            if row.get("opportunity_score", 0) >= 0.70: reasons.append("✅ Opportunité ML ≥ 70% — modèle prédit forte dynamique")
+            if row.get("pred_attractivite_2026", 0) > row["score_attractivite"]: reasons.append("✅ Trajectoire ascendante prévue en 2026")
+            for r in reasons:
+                st.markdown(f"- {r}")
+            st.markdown("**Secteurs recommandés :**")
+            sec_cols = st.columns(3)
+            for i, (ico, lbl, sc) in enumerate(top3_sec):
+                with sec_cols[i]:
+                    c = "#16A34A" if sc >= 70 else "#1A56DB" if sc >= 50 else "#D97706"
+                    st.markdown(
+                        f"<div style='background:#F0FDF4;border:1px solid #BBF7D0;border-radius:8px;"
+                        f"padding:10px;text-align:center;'>"
+                        f"<div style='font-size:20px;'>{ico}</div>"
+                        f"<div style='font-weight:700;font-size:12px;'>{lbl}</div>"
+                        f"<div style='font-size:14px;font-weight:800;color:{c};'>{sc}%</div>"
+                        f"</div>", unsafe_allow_html=True)
+
+    # ── Export PDF ────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### ⬇️ Export")
+
+    rows_html_pdf = "<table><tr><th>Commune</th><th>Dép.</th><th>Score</th><th>Opportunité ML</th><th>Préd. 2026</th><th>Chômage</th><th>Revenu méd.</th><th>Profil ML</th><th>Raisons clés</th></tr>"
+    for _, row in df_p.iterrows():
+        reasons_short = []
+        if row["score_attractivite"] >= 0.70: reasons_short.append("Attractivité ≥70%")
+        if row.get("taux_chomage",15) < 10: reasons_short.append(f"Chômage bas ({row['taux_chomage']:.1f}%)")
+        if row.get("revenu_median",0) > 28000: reasons_short.append("Revenu élevé")
+        if row.get("pred_attractivite_2026",0) > row["score_attractivite"]: reasons_short.append("Tendance +2026")
+        badge_cls = "green" if row["score_pct"] >= 80 else "amber"
+        rows_html_pdf += (
+            f"<tr><td><b>{row['ville']}</b></td>"
+            f"<td>{row.get('dept_nom','')}</td>"
+            f"<td><span class='score-badge {badge_cls}'>{row['score_pct']:.0f}%</span></td>"
+            f"<td>{row['opp_pct']:.0f}%</td>"
+            f"<td>{row['pred_pct']:.0f}%</td>"
+            f"<td>{row.get('taux_chomage',0):.1f}%</td>"
+            f"<td>{int(row.get('revenu_median',0)):,} €</td>"
+            f"<td>{row.get('ml_cluster','N/A')}</td>"
+            f"<td style='font-size:11px;color:#475569;'>{' · '.join(reasons_short)}</td></tr>"
+        )
+    rows_html_pdf += "</table>"
+
+    sources = [
+        {"nom":"INSEE — Fichier Localisation des équipements","desc":"Données socio-économiques communales (population, emploi, revenus)","url":"insee.fr/fr/statistiques"},
+        {"nom":"INSEE — Taux de chômage localisés","desc":"Taux de chômage par zone d'emploi et commune","url":"insee.fr/fr/statistiques/2012795"},
+        {"nom":"DREES — Atlas de la démographie médicale","desc":"Densité médicale par commune et département","url":"drees.solidarites-sante.gouv.fr"},
+        {"nom":"DVF — Demandes de valeurs foncières","desc":"Prix de l'immobilier par commune (transactions notariées)","url":"app.dvf.etalab.gouv.fr"},
+        {"nom":"ICEBERG v5.0 — Modèle ML interne","desc":"Score d'attractivité calculé par Gradient Boosting sur 18 indicateurs","url":"Modèle propriétaire ICEBERG"},
+        {"nom":"Banque des Territoires — Baromètre des territoires","desc":"Indicateurs de vitalité et fragilité territoriale","url":"banquedesterritoires.fr"},
+    ]
+    date_str = datetime.datetime.now().strftime("%d/%m/%Y à %H:%M")
+    html_content = _generate_rapport_html(
+        titre="Rapport — Zones Prioritaires",
+        sous_titre=f"{len(df_p)} communes à fort potentiel · Départements 91 & 94",
+        intro=(
+            f"Ce rapport présente les {len(df_p)} communes des départements de l'Essonne (91) et du "
+            f"Val-de-Marne (94) identifiées comme <b>zones prioritaires</b> par le modèle d'intelligence "
+            f"artificielle ICEBERG v5.0. Ces communes obtiennent un score d'attractivité territoriale "
+            f"supérieur ou égal à 70%, calculé sur la base de 18 indicateurs socio-économiques. "
+            f"Elles représentent les meilleures opportunités d'investissement, d'implantation commerciale "
+            f"ou de déploiement de services publics et privés sur le territoire."
+        ),
+        methodologie=(
+            "<h3>Indicateurs utilisés (18 variables)</h3>"
+            "<p>Le score d'attractivité est calculé par un modèle <b>Gradient Boosting</b> entraîné "
+            "sur les données historiques 2019-2024. Les 18 indicateurs incluent :</p>"
+            "<ul style='margin:8px 0 8px 20px;color:#475569;line-height:1.8;'>"
+            "<li><b>Emploi :</b> taux de chômage, taux d'activité, nb d'entreprises actives</li>"
+            "<li><b>Économie :</b> revenu médian, prix foncier m², densité commerciale</li>"
+            "<li><b>Démographie :</b> population, densité hab/km², solde migratoire</li>"
+            "<li><b>Services :</b> couverture médicale, accès mobilité, équipements scolaires</li>"
+            "<li><b>ML prédictif :</b> score opportunité, profil cluster, prédiction 2026</li>"
+            "</ul>"
+            "<p><b>Seuil zone prioritaire :</b> score ≥ 0.70 (normalisé entre 0 et 1).</p>"
+        ),
+        rows_html=rows_html_pdf,
+        sources=sources,
+        date_str=date_str
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button(
+            "⬇️ Télécharger rapport HTML (imprimable PDF)",
+            data=html_content.encode("utf-8"),
+            file_name=f"rapport_zones_prioritaires_{datetime.datetime.now().strftime('%Y%m%d')}.html",
+            mime="text/html",
+            use_container_width=True,
+            type="primary"
+        )
+    with c2:
+        csv_data = df_show.to_csv(index=False, encoding="utf-8-sig")
+        st.download_button(
+            "⬇️ Données CSV",
+            data=csv_data,
+            file_name="zones_prioritaires.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    st.caption("💡 Pour générer un PDF : ouvrez le fichier HTML dans votre navigateur → Fichier → Imprimer → Enregistrer en PDF")
+
+
+# ══════════════════════════════════════════════════════════════════
+# RAPPORT SIGNAUX FORTS — Directeur uniquement
+# ══════════════════════════════════════════════════════════════════
+def page_rapport_signaux(df: pd.DataFrame):
+    page_header("🚨", "Rapport Signaux Forts",
+                "Territoires en fragilité détectés par l'IA · Export PDF — Accès Directeur",
+                badge="Confidentiel")
+
+    df = build_ml_features(df)
+    df_s = df[df["cat_signal_faible"] == "Signal Fort"].copy()
+    df_s["sig_pct"]  = (df_s["score_signal_faible"]*100).round(1)
+    df_s["risk_pct"] = (df_s["risk_score"]*100).round(1)
+    df_s = df_s.sort_values("score_signal_faible", ascending=False)
+
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#FEF3C7,#FFFBEB);border:1px solid #FDE68A;
+         border-radius:14px;padding:16px 22px;margin-bottom:22px;display:flex;
+         align-items:center;gap:16px;">
+      <div style="font-size:36px;">⚡</div>
+      <div>
+        <div style="font-size:20px;font-weight:800;color:#92400E;">{len(df_s)} signaux forts détectés</div>
+        <div style="font-size:13px;color:#B45309;margin-top:2px;">
+          Territoires en fragilité identifiés par l'IA · Nécessitent un plan d'action prioritaire · Dép. 91 &amp; 94</div>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown(
+        "<div style='background:#FFF1F2;border:1px solid #FECDD3;border-radius:10px;"
+        "padding:14px 18px;margin-bottom:20px;'>"
+        "<b style='color:#9F1239;'>📖 Qu'est-ce qu'un signal fort ?</b><br>"
+        "<span style='color:#475569;font-size:13px;line-height:1.7;'>"
+        "Un signal fort est détecté par le modèle ML lorsqu'une commune cumule simultanément "
+        "plusieurs facteurs de fragilité : <b>chômage élevé</b> (> 12%), <b>taux de pauvreté élevé</b> "
+        "(> 20%), <b>perte de commerces</b> (désert commercial), <b>désertification médicale</b>, "
+        "ou <b>baisse démographique</b>. Le modèle Gradient Boosting attribue un score de fragilité "
+        "normalisé entre 0 et 1 — au-delà de 0.65, le territoire est classé en signal fort."
+        "</span></div>",
+        unsafe_allow_html=True
+    )
+
+    # Tableau
+    st.markdown("#### 📊 Tableau complet des signaux forts")
+    cols_s = ["ville","dept_nom","sig_pct","risk_pct","taux_chomage","taux_pauvrete",
+              "score_desert_medical","score_desert_commercial","population","ml_cluster"]
+    cols_r = {"ville":"Commune","dept_nom":"Département","sig_pct":"Signal %",
+              "risk_pct":"Risque ML %","taux_chomage":"Chômage %","taux_pauvrete":"Pauvreté %",
+              "score_desert_medical":"Désert méd.","score_desert_commercial":"Désert com.",
+              "population":"Population","ml_cluster":"Profil ML"}
+    df_show_s = df_s[[c for c in cols_s if c in df_s.columns]].rename(columns=cols_r)
+    st.dataframe(df_show_s.reset_index(drop=True), use_container_width=True, height=400)
+
+    # Fiches
+    st.markdown("#### 🔍 Analyse commune par commune")
+    for _, row in df_s.iterrows():
+        sev = "🔴 Critique" if row["sig_pct"] >= 75 else ("🟠 Sévère" if row["sig_pct"] >= 60 else "🟡 Modéré")
+        freins = _compute_freins(row)
+        with st.expander(f"{sev} — {row['ville']} · Signal {row['sig_pct']:.0f}% · {row.get('dept_nom','')}"):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Score signal",  f"{row['sig_pct']:.0f}%")
+            c2.metric("Risque ML",     f"{row['risk_pct']:.0f}%")
+            c3.metric("Chômage",       f"{row.get('taux_chomage',0):.1f}%")
+            c4.metric("Pauvreté",      f"{row.get('taux_pauvrete',0):.1f}%")
+            st.markdown("**Freins identifiés par l'IA :**")
+            for ico, desc, sev_val in freins:
+                sev_lbl   = "Critique" if sev_val > 0.65 else ("Élevé" if sev_val > 0.40 else "Modéré")
+                sev_color = "#DC2626" if sev_val > 0.65 else ("#D97706" if sev_val > 0.40 else "#64748B")
+                st.markdown(
+                    f"<div style='display:flex;align-items:center;gap:8px;padding:5px 0;"
+                    f"border-bottom:1px solid #F0F4F8;'>"
+                    f"<span style='font-size:16px;'>{ico}</span>"
+                    f"<span style='flex:1;font-size:12px;'>{desc}</span>"
+                    f"<span style='background:{"#FEE2E2" if sev_val>0.65 else "#FEF3C7"};color:{sev_color};"
+                    f"padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;'>{sev_lbl}</span>"
+                    f"</div>", unsafe_allow_html=True)
+            st.markdown("**Plan d'action recommandé :**")
+            actions = []
+            if row.get("taux_chomage", 0) > 12: actions.append("🎯 Mise en place d'une cellule emploi locale · partenariat France Travail")
+            if row.get("taux_pauvrete", 0) > 20: actions.append("🏠 Renforcement des aides sociales · accès au logement social")
+            if row.get("score_desert_medical", 0) > 0.6: actions.append("🏥 Incitation à l'installation médicale · maison de santé pluridisciplinaire")
+            if row.get("score_desert_commercial", 0) > 0.6: actions.append("🛒 Soutien au commerce de proximité · épicerie solidaire ou marché itinérant")
+            if not actions: actions.append("📊 Suivi renforcé des indicateurs · réévaluation dans 6 mois")
+            for a in actions:
+                st.markdown(f"- {a}")
+
+    # Export
+    st.markdown("---")
+    rows_html_s = "<table><tr><th>Commune</th><th>Dép.</th><th>Signal %</th><th>Risque ML</th><th>Chômage</th><th>Pauvreté</th><th>Profil ML</th><th>Freins principaux</th></tr>"
+    for _, row in df_s.iterrows():
+        freins = _compute_freins(row)
+        freins_txt = " · ".join(f"{ico} {d[:30]}" for ico, d, _ in freins[:3])
+        badge_cls = "red" if row["sig_pct"] >= 75 else "amber"
+        rows_html_s += (
+            f"<tr><td><b>{row['ville']}</b></td>"
+            f"<td>{row.get('dept_nom','')}</td>"
+            f"<td><span class='score-badge {badge_cls}'>{row['sig_pct']:.0f}%</span></td>"
+            f"<td>{row['risk_pct']:.0f}%</td>"
+            f"<td>{row.get('taux_chomage',0):.1f}%</td>"
+            f"<td>{row.get('taux_pauvrete',0):.1f}%</td>"
+            f"<td>{row.get('ml_cluster','N/A')}</td>"
+            f"<td style='font-size:11px;color:#475569;'>{freins_txt}</td></tr>"
+        )
+    rows_html_s += "</table>"
+
+    sources_s = [
+        {"nom":"INSEE — Taux de pauvreté par commune","desc":"Taux de pauvreté au seuil de 60% du revenu médian","url":"insee.fr/fr/statistiques/6036907"},
+        {"nom":"INSEE — Taux de chômage localisés","desc":"Chômage trimestriel par zone d'emploi","url":"insee.fr/fr/statistiques/2012795"},
+        {"nom":"DREES — Zones sous-dotées","desc":"Cartographie officielle des déserts médicaux","url":"drees.solidarites-sante.gouv.fr/publications-dossiers-de-presse"},
+        {"nom":"Observatoire des territoires — ANCT","desc":"Indicateurs de fragilité et de vulnérabilité territoriale","url":"observatoire.anct.gouv.fr"},
+        {"nom":"Banque des Territoires — Baromètre 2024","desc":"Perception et réalité des inégalités territoriales","url":"banquedesterritoires.fr/barometre-des-territoires"},
+        {"nom":"ICEBERG v5.0 — Score signal faible","desc":"Détection par Gradient Boosting de 9 indicateurs de fragilité cumulés","url":"Modèle propriétaire ICEBERG"},
+    ]
+    date_str = datetime.datetime.now().strftime("%d/%m/%Y à %H:%M")
+    html_s = _generate_rapport_html(
+        titre="Rapport — Signaux Forts",
+        sous_titre=f"{len(df_s)} territoires en fragilité détectés · Départements 91 & 94",
+        intro=(
+            f"Ce rapport recense les {len(df_s)} communes des départements de l'Essonne (91) et du "
+            f"Val-de-Marne (94) identifiées en <b>signal fort de fragilité territoriale</b> par le "
+            f"modèle d'intelligence artificielle ICEBERG v5.0. "
+            f"Ces communes cumulent plusieurs facteurs de vulnérabilité socio-économique détectés "
+            f"simultanément, nécessitant une attention prioritaire et un plan d'action adapté. "
+            f"Le score de signal faible dépasse 65% pour toutes les communes listées dans ce rapport."
+        ),
+        methodologie=(
+            "<h3>Détection des signaux forts</h3>"
+            "<p>Le modèle <b>Gradient Boosting</b> analyse 9 indicateurs de fragilité en combinaison :</p>"
+            "<ul style='margin:8px 0 8px 20px;color:#475569;line-height:1.8;'>"
+            "<li><b>Emploi :</b> taux de chômage &gt; 12%, faiblesse du tissu entrepreneurial</li>"
+            "<li><b>Social :</b> taux de pauvreté &gt; 20%, revenu médian &lt; 18 000 €</li>"
+            "<li><b>Santé :</b> densité médicale &lt; 2,5 généralistes / 10 000 hab.</li>"
+            "<li><b>Commerce :</b> score désert commercial &gt; 0.60</li>"
+            "<li><b>Mobilité :</b> accessibilité transports &lt; seuil acceptable</li>"
+            "<li><b>Démographie :</b> population &lt; 1 000 hab. ou baisse tendancielle</li>"
+            "<li><b>ML :</b> score risque &gt; 0.65 calculé par le modèle Random Forest</li>"
+            "</ul>"
+            "<p><b>Seuil signal fort :</b> score fragilité normalisé ≥ 0.65.</p>"
+        ),
+        rows_html=rows_html_s,
+        sources=sources_s,
+        date_str=date_str
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button(
+            "⬇️ Télécharger rapport HTML (imprimable PDF)",
+            data=html_s.encode("utf-8"),
+            file_name=f"rapport_signaux_forts_{datetime.datetime.now().strftime('%Y%m%d')}.html",
+            mime="text/html",
+            use_container_width=True,
+            type="primary"
+        )
+    with c2:
+        st.download_button(
+            "⬇️ Données CSV",
+            data=df_show_s.to_csv(index=False, encoding="utf-8-sig"),
+            file_name="signaux_forts.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    st.caption("💡 Pour générer un PDF : ouvrez le fichier HTML dans votre navigateur → Fichier → Imprimer → Enregistrer en PDF")
+
+
+
+
+
+
 def main():
     init_session_state()
 
@@ -2203,6 +3338,10 @@ def main():
         page_classement(df)
     elif "Attractivité" in page:
         page_attractivite(df)
+    elif "Rapport Prioritaires" in page:
+        page_rapport_prioritaires(df)
+    elif "Rapport Signaux" in page:
+        page_rapport_signaux(df)
     elif "Déserts" in page:
         page_deserts(df)
     elif "Indicateurs" in page:
@@ -2219,7 +3358,5 @@ def main():
         st.info("Page non trouvée.")
 
 
-if __name__ == "__main__":
-    main()
--e 
+
 main()
