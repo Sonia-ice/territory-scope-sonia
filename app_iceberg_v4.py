@@ -234,7 +234,7 @@ except ImportError:
 # ══════════════════════════════════════════════════════════════════
 # 1. CONFIGURATION
 # ══════════════════════════════════════════════════════════════════
-GROQ_API_KEY    = os.environ.get("GROQ_API_KEY",    "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")
+GROQ_API_KEY    = os.environ.get("GROQ_API_KEY",    "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")
 MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "riVNPI2YPh7aQQHmU9t1bdzLqaqXkFTD")
 USE_MISTRAL     = True
 
